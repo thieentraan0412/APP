@@ -1,0 +1,14 @@
+name = "captures-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+# R2 — kho lưu file ảnh/video
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "captures"
+
+# D1 — database lưu metadata
+[[d1_databases]]
+binding = "DB"
+database_name = "captures-db"
+database_id = "1df501ed-4f9a-4cba-ae6c-c0f35bc9b66e"

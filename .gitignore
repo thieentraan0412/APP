@@ -1,0 +1,37 @@
+# ===== Dependencies =====
+node_modules/
+
+# ===== Build output =====
+dist/
+dist-ssr/
+build/
+
+# ===== Rust / Tauri =====
+target/
+desktop/src-tauri/target/
+
+# ===== ffmpeg sidecar (231MB — vượt giới hạn 100MB của GitHub) =====
+# Tải lại ffmpeg.exe và đặt vào desktop/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
+desktop/src-tauri/binaries/
+
+# ===== Secrets / env =====
+.env
+.env.*
+.dev.vars
+*.local
+
+# ===== Wrangler (Cloudflare) =====
+.wrangler/
+worker/.wrangler/
+
+# ===== Logs =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== OS / Editor =====
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
