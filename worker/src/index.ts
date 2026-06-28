@@ -20,7 +20,7 @@ export interface Env {
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, HEAD, POST, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, x-api-key",
 };
 
@@ -49,6 +49,54 @@ function authed(req: Request, env: Env): boolean {
 // Lấy File từ form (form.get trả về File | string | null)
 function asFile(v: File | string | null): File | null {
   return v && typeof v !== "string" ? v : null;
+}
+
+// Phục vụ file từ R2 có hỗ trợ HTTP Range (để tua video) + HEAD.
+async function serveR2(env: Env, key: string, mime: string, req: Request): Promise<Response> {
+  const rangeHeader = req.headers.get("Range");
+  let range: R2Range | undefined;
+  if (rangeHeader) {
+    const m = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader.trim());
+    if (m) {
+      const offset = parseInt(m[1], 10);
+      range = m[2] ? { offset, length: parseInt(m[2], 10) - offset + 1 } : { offset };
+    }
+  }
+
+  // HEAD: chỉ trả metadata (báo cho trình duyệt biết có thể tua)
+  if (req.method === "HEAD") {
+    const head = await env.BUCKET.head(key);
+    if (!head) return new Response("Not found", { status: 404, headers: CORS });
+    return new Response(null, {
+      headers: {
+        "Content-Type": mime,
+        "Content-Length": String(head.size),
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=31536000",
+        ...CORS,
+      },
+    });
+  }
+
+  const obj = await env.BUCKET.get(key, range ? { range } : undefined);
+  if (!obj) return new Response("Not found", { status: 404, headers: CORS });
+
+  const headers = new Headers(CORS);
+  headers.set("Content-Type", mime);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "public, max-age=31536000");
+
+  if (range && obj.range) {
+    const r = obj.range as { offset?: number; length?: number };
+    const offset = r.offset ?? 0;
+    const length = r.length ?? obj.size - offset;
+    headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${obj.size}`);
+    headers.set("Content-Length", String(length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+
+  headers.set("Content-Length", String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
 }
 
 interface ItemRow {
@@ -191,18 +239,14 @@ export default {
       }
     }
 
-    // ---------- Công khai: file đã gộp ----------
-    if (req.method === "GET" && path.startsWith("/file/")) {
+    // ---------- Công khai: file đã gộp (hỗ trợ tua video) ----------
+    if ((req.method === "GET" || req.method === "HEAD") && path.startsWith("/file/")) {
       const id = path.slice("/file/".length);
       const row = await env.DB.prepare("SELECT r2_key, mime FROM items WHERE id = ?")
         .bind(id)
         .first<Pick<ItemRow, "r2_key" | "mime">>();
       if (!row) return new Response("Not found", { status: 404, headers: CORS });
-      const obj = await env.BUCKET.get(row.r2_key);
-      if (!obj) return new Response("Not found", { status: 404, headers: CORS });
-      return new Response(obj.body, {
-        headers: { "Content-Type": row.mime, "Cache-Control": "public, max-age=31536000", ...CORS },
-      });
+      return serveR2(env, row.r2_key, row.mime, req);
     }
 
     // ---------- Công khai: ảnh gốc (để sửa) ----------
@@ -226,10 +270,6 @@ export default {
         .bind(id)
         .first<Pick<ItemRow, "type" | "title">>();
       if (!row) return new Response("Not found", { status: 404 });
-      const media =
-        row.type === "video"
-          ? `<video src="/file/${id}" controls autoplay muted style="max-width:100%;max-height:90vh"></video>`
-          : `<img src="/file/${id}" style="max-width:100%;max-height:90vh"/>`;
       // Thoát HTML cho tiêu đề
       const esc = (s: string) =>
         s.replace(/[&<>"']/g, (c) =>
@@ -237,13 +277,35 @@ export default {
         );
       const title = row.title ? esc(row.title) : "";
       const heading = title
-        ? `<h1 style="color:#fff;font:600 18px system-ui;margin:16px 0 8px">${title}</h1>`
+        ? `<h1 style="color:#fff;font:600 18px system-ui;margin:16px 0 10px">${title}</h1>`
         : "";
+
+      const media =
+        row.type === "video"
+          ? `<video id="vid" src="/file/${id}" controls autoplay muted playsinline style="max-width:100%;max-height:78vh"></video>
+<div class="skip">
+  <button onclick="seek(-10)">⏪ 10s</button>
+  <button onclick="seek(-5)">◀ 5s</button>
+  <button onclick="seek(5)">5s ▶</button>
+  <button onclick="seek(10)">10s ⏩</button>
+</div>
+<script>
+function seek(d){var v=document.getElementById('vid');if(!v)return;var t=v.currentTime+d;v.currentTime=Math.max(0,Math.min(v.duration||1e9,t));}
+document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);else if(e.key==='ArrowRight')seek(5);else if(e.key==='j')seek(-10);else if(e.key==='l')seek(10);});
+</script>`
+          : `<img src="/file/${id}" style="max-width:100%;max-height:90vh"/>`;
+
       const html = `<!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title || id}</title></head>
-<body style="margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#111">
+<title>${title || id}</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#111;font-family:system-ui,sans-serif}
+  .skip{display:flex;gap:8px;margin-top:12px}
+  .skip button{cursor:pointer;background:#1f2937;color:#fff;border:1px solid #374151;border-radius:8px;padding:8px 14px;font-size:14px}
+  .skip button:hover{background:#374151}
+</style></head>
+<body>
 ${heading}${media}
 </body></html>`;
       return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });

@@ -5,7 +5,7 @@
 
 Mỗi lần thực hiện một checklist --> Sau khi thực hiện xong thì tick vào ☐ đã hoàn thành , và ghi chú vào dưới hàng đó những công việc đã làm
 
-**Tiến độ tổng:** ✅ Giai đoạn 0 → 5 xong. Giai đoạn 6: TRANG QUẢN LÝ (xem/copy/xoá/sửa) đã xong + có khoá API key; còn vài tinh chỉnh nhỏ tuỳ chọn (đổi phím tắt, retry, dọn file tạm, icon).
+**Tiến độ tổng:** ✅ Giai đoạn 0 → 6 xong (gồm đổi phím tắt, retry upload, cảnh báo video dài, dọn file tạm, đổi tên app; chỉ còn icon riêng). ✅ Giai đoạn 8: đã build **.msi** (sau khi tắt Smart App Control). Còn lại: Giai đoạn 7 (kiểm thử) + cài thử máy sạch + (tuỳ chọn) ký số/icon.
 
 ---
 
@@ -181,14 +181,22 @@ Mỗi lần thực hiện một checklist --> Sau khi thực hiện xong thì ti
 
 ### Hoàn thiện khác
 - [x] Thông báo (toast) khi copy / xoá / cập nhật
-  > (Chưa thêm thông báo hệ thống khi chụp/quay — tuỳ chọn.)
-- [ ] Màn hình **Cài đặt**: cho đổi phím tắt — *chưa làm*
-- [ ] Retry tự động khi upload lỗi mạng — *chưa làm*
-- [ ] Giới hạn / cảnh báo khi video quá dài — *chưa làm*
-- [ ] Dọn file tạm sau khi upload xong — *chưa làm*
-- [ ] Icon app + tên app chỉnh chu — *chưa làm*
+- [x] Màn hình **Cài đặt**: cho đổi phím tắt
+  > `SettingsScreen` — bấm ô rồi nhấn tổ hợp phím mới (dùng e.code, cần ≥1 modifier). Lưu vào localStorage + lệnh Rust `set_shortcuts` (unregister_all rồi register lại). Handler so khớp theo state động.
+- [x] Retry tự động khi upload lỗi mạng
+  > `fetchRetry` trong api.ts: thử lại 3 lần (cách 1.2s) khi lỗi mạng, không thử lại khi server trả mã lỗi.
+- [x] Giới hạn / cảnh báo khi video quá dài
+  > Banner đếm thời gian quay; quá 2 phút chuyển vàng + cảnh báo "video đã khá dài".
+- [x] Dọn file tạm sau khi upload xong
+  > Lệnh Rust `remove_temp(path)` xoá file mp4 tạm sau khi upload video xong.
+- [~] Icon app + tên app chỉnh chu
+  > Đổi tên: productName "CaptureShare", tiêu đề cửa sổ "Chụp & Chia sẻ". Icon vẫn là mặc định Tauri (đổi icon cần file ảnh nguồn — chờ logo từ người dùng).
 
-**Hoàn tất khi:** dùng thử thực tế thấy mượt. ⏳ (trang quản lý xong; còn vài tinh chỉnh nhỏ).
+**Hoàn tất khi:** dùng thử thực tế thấy mượt. ✅ Cơ bản xong (chỉ còn icon riêng — tuỳ chọn).
+
+### Sửa lỗi đã gặp
+- [x] Ghi chú: thay `prompt` bằng ô nhập **inline ngay tại vị trí note**; fix mất focus (focus qua ref + chặn blur giả 300ms).
+- [x] Sửa tiêu đề **inline** ngay trên thẻ thư viện (Enter lưu, Esc huỷ, click ra ngoài lưu).
 
 ---
 
@@ -207,13 +215,15 @@ Mỗi lần thực hiện một checklist --> Sau khi thực hiện xong thì ti
 
 ## Giai đoạn 8 — Đóng gói & phát hành
 
-- [ ] `npm run tauri build` → ra file cài (.msi / .exe)
-- [ ] Cài thử trên máy khác → chạy được
-- [ ] Viết README hướng dẫn cài + dùng
-- [ ] (Tuỳ chọn) Ký số (code signing) để tránh cảnh báo SmartScreen
-- [ ] (Tuỳ chọn) Trang tải về / cập nhật
+- [x] `npm run tauri build` → ra file cài **.msi**
+  > ⚠️ Bị chặn bởi **Smart App Control** (Windows 11, lỗi 4551 chặn build-script chưa ký). SAC tự chuyển từ Evaluation → Enforced sau vài ngày. Đã **TẮT SAC** (vĩnh viễn) để build được.
+  > Build vào `CARGO_TARGET_DIR=C:\captureshare-build` (tránh OneDrive đồng bộ artifacts). Ra `CaptureShare_0.1.0_x64_en-US.msi` (91.5MB), đã copy ra Desktop.
+- [ ] Cài thử trên máy khác → chạy được — *chưa làm*
+- [x] Viết README hướng dẫn cài + dùng
+- [ ] (Tuỳ chọn) Ký số (code signing) để tránh cảnh báo SmartScreen — *chưa làm*
+- [ ] (Tuỳ chọn) Trang tải về / cập nhật — *chưa làm*
 
-**Hoàn tất khi:** có file cài đặt, người khác cài và dùng được trọn vẹn.
+**Hoàn tất khi:** có file cài đặt, người khác cài và dùng được trọn vẹn. ✅ Đã có .msi (cài thử trên máy sạch để xác nhận hoàn toàn).
 
 ---
 
