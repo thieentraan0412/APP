@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { LibraryItem } from "../lib/api";
 
 interface Props {
@@ -11,6 +11,7 @@ interface Props {
   onOpen: (url: string) => void;
   onDelete: (id: string) => void;
   onEdit: (item: LibraryItem) => void;
+  onSaveTitle: (id: string, title: string) => void;
 }
 
 function fmtDate(ms: number): string {
@@ -36,12 +37,32 @@ function endOfDay(s: string): number {
 }
 
 export function LibraryScreen(props: Props) {
-  const { items, loading, error, onRefresh, onBack, onCopy, onOpen, onDelete, onEdit } = props;
+  const { items, loading, error, onRefresh, onBack, onCopy, onOpen, onDelete, onEdit, onSaveTitle } =
+    props;
 
+  const [query, setQuery] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | "image" | "video">("all");
   const [sortOrder, setSortOrder] = useState<"newest" | "oldest">("newest");
+
+  // Sửa tiêu đề trực tiếp (inline)
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const editingRef = useRef<string | null>(null);
+
+  function startEdit(it: LibraryItem) {
+    editingRef.current = it.id;
+    setEditingId(it.id);
+    setDraft(it.title ?? "");
+  }
+  function finishEdit(save: boolean) {
+    const id = editingRef.current;
+    if (id == null) return;
+    editingRef.current = null;
+    setEditingId(null);
+    if (save) onSaveTitle(id, draft.trim());
+  }
 
   function presetDays(days: number) {
     const today = new Date();
@@ -56,7 +77,9 @@ export function LibraryScreen(props: Props) {
   }
 
   const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
     const list = items.filter((it) => {
+      if (q && !(it.title || "").toLowerCase().includes(q)) return false;
       if (from && it.createdAt < startOfDay(from)) return false;
       if (to && it.createdAt > endOfDay(to)) return false;
       if (typeFilter !== "all" && it.type !== typeFilter) return false;
@@ -66,7 +89,7 @@ export function LibraryScreen(props: Props) {
       sortOrder === "newest" ? b.createdAt - a.createdAt : a.createdAt - b.createdAt
     );
     return list;
-  }, [items, from, to, typeFilter, sortOrder]);
+  }, [items, query, from, to, typeFilter, sortOrder]);
 
   return (
     <main className="container">
@@ -76,6 +99,17 @@ export function LibraryScreen(props: Props) {
           {loading ? "Đang tải…" : "↻ Làm mới"}
         </button>
         <button onClick={onBack}>← Trang chính</button>
+      </div>
+
+      {/* Tìm theo tiêu đề */}
+      <div className="searchbar">
+        <input
+          type="text"
+          placeholder="🔎 Tìm theo tiêu đề…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        {query && <button onClick={() => setQuery("")}>✕</button>}
       </div>
 
       {/* Lọc theo thời gian */}
@@ -132,6 +166,33 @@ export function LibraryScreen(props: Props) {
                 <div className="thumb-video">🎥 Video</div>
               )}
             </div>
+            {editingId === it.id ? (
+              <input
+                className="title-edit-input"
+                autoFocus
+                value={draft}
+                placeholder="Nhập tiêu đề…"
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    finishEdit(true);
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    finishEdit(false);
+                  }
+                }}
+                onBlur={() => finishEdit(true)}
+              />
+            ) : (
+              <div
+                className="card-title"
+                title="Bấm để sửa tiêu đề"
+                onClick={() => startEdit(it)}
+              >
+                {it.title || <span className="untitled">(không tiêu đề)</span>}
+              </div>
+            )}
             <div className="card-meta">
               <span className="type-tag">{it.type === "image" ? "Ảnh" : "Video"}</span>
               <span className="date">{fmtDate(it.createdAt)}</span>
@@ -139,6 +200,7 @@ export function LibraryScreen(props: Props) {
             <div className="card-actions">
               <button onClick={() => onCopy(it.url)} title="Copy link">📋</button>
               <button onClick={() => onOpen(it.url)} title="Mở link">🔗</button>
+              <button onClick={() => startEdit(it)} title="Đổi tiêu đề">🏷️</button>
               {it.type === "image" && (
                 <button onClick={() => onEdit(it)} title="Sửa annotate">✏️</button>
               )}

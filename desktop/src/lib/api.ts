@@ -11,9 +11,31 @@ export interface UploadResult {
   url: string;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Gọi fetch có tự thử lại khi lỗi mạng (không thử lại khi server trả mã lỗi).
+async function fetchRetry(
+  url: string,
+  opts?: RequestInit,
+  attempts = 3,
+  delayMs = 1200
+): Promise<Response> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await globalThis.fetch(url, opts);
+    } catch (e) {
+      lastErr = e;
+      if (i < attempts - 1) await sleep(delayMs);
+    }
+  }
+  throw lastErr;
+}
+
 export interface LibraryItem {
   id: string;
   type: "image" | "video";
+  title: string | null;
   createdAt: number;
   url: string;
   fileUrl: string;
@@ -23,6 +45,7 @@ export interface LibraryItem {
 export interface ItemDetail {
   id: string;
   type: "image" | "video";
+  title: string | null;
   createdAt: number;
   annotations: Annotations | null;
   hasOriginal: boolean;
@@ -34,13 +57,15 @@ export interface ItemDetail {
 export async function uploadImage(
   flattened: Blob,
   original: Blob,
-  annotations: Annotations
+  annotations: Annotations,
+  title = ""
 ): Promise<UploadResult> {
   const form = new FormData();
   form.append("file", flattened, "image.png");
   form.append("original", original, "original.png");
   form.append("type", "image");
   form.append("annotations", JSON.stringify(annotations));
+  form.append("title", title);
   return postUpload(form);
 }
 
@@ -52,7 +77,7 @@ export async function uploadVideo(blob: Blob): Promise<UploadResult> {
 }
 
 async function postUpload(form: FormData): Promise<UploadResult> {
-  const res = await fetch(`${WORKER_URL}/api/upload`, { method: "POST", body: form });
+  const res = await fetchRetry(`${WORKER_URL}/api/upload`, { method: "POST", body: form });
   if (!res.ok) throw new Error(`Tải lên thất bại (HTTP ${res.status})`);
   return res.json();
 }
@@ -61,20 +86,20 @@ async function postUpload(form: FormData): Promise<UploadResult> {
 const authHeader = { "x-api-key": API_KEY };
 
 export async function listItems(): Promise<LibraryItem[]> {
-  const res = await fetch(`${WORKER_URL}/api/items`, { headers: authHeader });
+  const res = await fetchRetry(`${WORKER_URL}/api/items`, { headers: authHeader });
   if (!res.ok) throw new Error(`Không tải được danh sách (HTTP ${res.status})`);
   const data = await res.json();
   return data.items as LibraryItem[];
 }
 
 export async function getItem(id: string): Promise<ItemDetail> {
-  const res = await fetch(`${WORKER_URL}/api/items/${id}`, { headers: authHeader });
+  const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, { headers: authHeader });
   if (!res.ok) throw new Error(`Không tải được chi tiết (HTTP ${res.status})`);
   return res.json();
 }
 
 export async function deleteItem(id: string): Promise<void> {
-  const res = await fetch(`${WORKER_URL}/api/items/${id}`, {
+  const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, {
     method: "DELETE",
     headers: authHeader,
   });
@@ -84,12 +109,25 @@ export async function deleteItem(id: string): Promise<void> {
 export async function updateItem(
   id: string,
   flattened: Blob,
-  annotations: Annotations
+  annotations: Annotations,
+  title = ""
 ): Promise<{ url: string }> {
   const form = new FormData();
   form.append("file", flattened, "image.png");
   form.append("annotations", JSON.stringify(annotations));
-  const res = await fetch(`${WORKER_URL}/api/items/${id}`, {
+  form.append("title", title);
+  return patchItem(id, form);
+}
+
+// Chỉ cập nhật tiêu đề (dùng cho video — không có editor)
+export async function updateTitle(id: string, title: string): Promise<{ url: string }> {
+  const form = new FormData();
+  form.append("title", title);
+  return patchItem(id, form);
+}
+
+async function patchItem(id: string, form: FormData): Promise<{ url: string }> {
+  const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, {
     method: "PATCH",
     headers: authHeader,
     body: form,
@@ -100,7 +138,7 @@ export async function updateItem(
 
 // Tải một URL ảnh về dạng data URL (để mở lại trong editor khi sửa)
 export async function fetchAsDataUrl(url: string): Promise<string> {
-  const res = await fetch(url);
+  const res = await fetchRetry(url);
   if (!res.ok) throw new Error(`Không tải được ảnh gốc (HTTP ${res.status})`);
   const blob = await res.blob();
   return await new Promise((resolve, reject) => {

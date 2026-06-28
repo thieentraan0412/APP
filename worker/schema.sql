@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS items (
   r2_key_orig TEXT,                  -- key ảnh GỐC (để sửa lại annotate); NULL nếu video
   mime        TEXT NOT NULL,         -- 'image/png' | 'video/mp4'
   annotations TEXT,                  -- JSON khung + note (NULL nếu video)
+  title       TEXT,                  -- tiêu đề do người dùng đặt (không bắt buộc)
   created_at  INTEGER NOT NULL       -- thời gian tạo (epoch ms)
 );
 

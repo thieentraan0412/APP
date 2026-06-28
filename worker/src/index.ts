@@ -58,6 +58,7 @@ interface ItemRow {
   r2_key_orig: string | null;
   mime: string;
   annotations: string | null;
+  title: string | null;
   created_at: number;
 }
 
@@ -77,6 +78,7 @@ export default {
         const file = asFile(form.get("file"));
         const type = String(form.get("type") || "image");
         const annotations = form.get("annotations")?.toString() ?? null;
+        const title = form.get("title")?.toString()?.trim() || null;
         const original = asFile(form.get("original"));
 
         if (!file) return json({ error: "Thiếu file" }, 400);
@@ -98,10 +100,10 @@ export default {
         }
 
         await env.DB.prepare(
-          `INSERT INTO items (id, type, r2_key, r2_key_orig, mime, annotations, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO items (id, type, r2_key, r2_key_orig, mime, annotations, title, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(id, type, key, origKey, mime, annotations, Date.now())
+          .bind(id, type, key, origKey, mime, annotations, title, Date.now())
           .run();
 
         return json({ id, url: `${url.origin}/v/${id}` });
@@ -114,11 +116,12 @@ export default {
     if (req.method === "GET" && path === "/api/items") {
       if (!authed(req, env)) return json({ error: "Không có quyền" }, 401);
       const { results } = await env.DB.prepare(
-        `SELECT id, type, annotations, created_at FROM items ORDER BY created_at DESC LIMIT 200`
-      ).all<Pick<ItemRow, "id" | "type" | "annotations" | "created_at">>();
+        `SELECT id, type, annotations, title, created_at FROM items ORDER BY created_at DESC LIMIT 200`
+      ).all<Pick<ItemRow, "id" | "type" | "annotations" | "title" | "created_at">>();
       const items = (results || []).map((r) => ({
         id: r.id,
         type: r.type,
+        title: r.title,
         createdAt: r.created_at,
         url: `${url.origin}/v/${r.id}`,
         fileUrl: `${url.origin}/file/${r.id}`,
@@ -142,6 +145,7 @@ export default {
         return json({
           id: row.id,
           type: row.type,
+          title: row.title,
           createdAt: row.created_at,
           annotations: row.annotations ? JSON.parse(row.annotations) : null,
           hasOriginal: !!row.r2_key_orig,
@@ -160,16 +164,29 @@ export default {
       if (req.method === "PATCH") {
         const form = await req.formData();
         const file = asFile(form.get("file"));
-        const annotations = form.get("annotations")?.toString() ?? null;
         // Thay ảnh đã gộp (giữ nguyên key) nếu gửi file mới
         if (file) {
           await env.BUCKET.put(row.r2_key, file.stream(), {
             httpMetadata: { contentType: row.mime },
           });
         }
-        await env.DB.prepare("UPDATE items SET annotations = ? WHERE id = ?")
-          .bind(annotations, id)
-          .run();
+        // Chỉ cập nhật cột nào được gửi (tránh xoá nhầm)
+        const sets: string[] = [];
+        const binds: (string | null)[] = [];
+        if (form.has("annotations")) {
+          sets.push("annotations = ?");
+          binds.push(form.get("annotations")?.toString() ?? null);
+        }
+        if (form.has("title")) {
+          sets.push("title = ?");
+          binds.push(form.get("title")?.toString()?.trim() || null);
+        }
+        if (sets.length) {
+          binds.push(id);
+          await env.DB.prepare(`UPDATE items SET ${sets.join(", ")} WHERE id = ?`)
+            .bind(...binds)
+            .run();
+        }
         return json({ ok: true, url: `${url.origin}/v/${id}` });
       }
     }
@@ -205,20 +222,29 @@ export default {
     // ---------- Công khai: trang xem ----------
     if (req.method === "GET" && path.startsWith("/v/")) {
       const id = path.slice("/v/".length);
-      const row = await env.DB.prepare("SELECT type FROM items WHERE id = ?")
+      const row = await env.DB.prepare("SELECT type, title FROM items WHERE id = ?")
         .bind(id)
-        .first<Pick<ItemRow, "type">>();
+        .first<Pick<ItemRow, "type" | "title">>();
       if (!row) return new Response("Not found", { status: 404 });
       const media =
         row.type === "video"
-          ? `<video src="/file/${id}" controls autoplay muted style="max-width:100%;max-height:100vh"></video>`
-          : `<img src="/file/${id}" style="max-width:100%;max-height:100vh"/>`;
+          ? `<video src="/file/${id}" controls autoplay muted style="max-width:100%;max-height:90vh"></video>`
+          : `<img src="/file/${id}" style="max-width:100%;max-height:90vh"/>`;
+      // Thoát HTML cho tiêu đề
+      const esc = (s: string) =>
+        s.replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string)
+        );
+      const title = row.title ? esc(row.title) : "";
+      const heading = title
+        ? `<h1 style="color:#fff;font:600 18px system-ui;margin:16px 0 8px">${title}</h1>`
+        : "";
       const html = `<!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${id}</title></head>
-<body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#111">
-${media}
+<title>${title || id}</title></head>
+<body style="margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#111">
+${heading}${media}
 </body></html>`;
       return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }

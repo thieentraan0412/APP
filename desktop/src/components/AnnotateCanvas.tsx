@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Stage, Layer, Image as KImage, Rect, Text, Transformer } from "react-konva";
 import type Konva from "konva";
 import { nanoid } from "nanoid";
@@ -30,6 +30,54 @@ export function AnnotateCanvas(props: Props) {
   const boxRefs = useRef<Map<string, Konva.Rect>>(new Map());
   const drawing = useRef<{ id: string; sx: number; sy: number } | null>(null);
 
+  // Sửa ghi chú trực tiếp tại vị trí note (thay cho prompt)
+  const [editing, setEditing] = useState<{ id: string; left: number; top: number } | null>(null);
+  const [draft, setDraft] = useState("");
+  const editingRef = useRef<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const openedAt = useRef(0);
+
+  // Mở ô nhập ngay tại toạ độ note (theo vị trí màn hình)
+  function openNoteEditor(id: string, stageX: number, stageY: number, text: string) {
+    const rect = stageRef.current?.container().getBoundingClientRect();
+    if (!rect) return;
+    editingRef.current = id;
+    openedAt.current = performance.now();
+    setDraft(text);
+    setEditing({ id, left: rect.left + stageX, top: rect.top + stageY });
+  }
+
+  // Bảo đảm ô nhập được focus sau khi hiện (autoFocus có thể bị click trên canvas cướp mất)
+  useEffect(() => {
+    if (editing) {
+      const el = inputRef.current;
+      if (el) {
+        el.focus();
+        el.select();
+      }
+    }
+  }, [editing]);
+
+  // Kết thúc sửa: lưu (text rỗng → xoá note) hoặc huỷ (note mới rỗng → xoá)
+  function finishNote(save: boolean) {
+    const id = editingRef.current;
+    if (!id) return;
+    editingRef.current = null;
+    setEditing(null);
+    const text = draft.trim();
+    if (save) {
+      if (!text) {
+        setNotes((prev) => prev.filter((x) => x.id !== id));
+        setSelectedId(null);
+      } else {
+        setNotes((prev) => prev.map((x) => (x.id === id ? { ...x, text } : x)));
+      }
+    } else {
+      // huỷ: bỏ note nếu nó vẫn đang rỗng (note vừa thêm)
+      setNotes((prev) => prev.filter((x) => !(x.id === id && x.text === "")));
+    }
+  }
+
   // Gắn Transformer vào khung đang chọn
   useEffect(() => {
     const tr = trRef.current;
@@ -54,12 +102,11 @@ export function AnnotateCanvas(props: Props) {
     }
 
     if (tool === "note") {
-      const px = pos.x, py = pos.y;
-      const text = window.prompt("Nội dung ghi chú:", "");
-      if (text && text.trim()) {
-        setNotes((prev) => [...prev, { id: nanoid(6), x: px, y: py, text: text.trim(), color }]);
-      }
+      const id = nanoid(6);
+      setNotes((prev) => [...prev, { id, x: pos.x, y: pos.y, text: "", color }]);
+      setSelectedId(id);
       setTool("select");
+      openNoteEditor(id, pos.x, pos.y, "");
       return;
     }
 
@@ -94,6 +141,7 @@ export function AnnotateCanvas(props: Props) {
   }
 
   return (
+    <>
     <Stage
       ref={stageRef}
       width={width}
@@ -154,7 +202,8 @@ export function AnnotateCanvas(props: Props) {
           />
         ))}
 
-        {notes.map((n) => (
+        {notes.map((n) =>
+          editing?.id === n.id ? null : (
           <Text
             key={n.id}
             x={n.x}
@@ -172,22 +221,14 @@ export function AnnotateCanvas(props: Props) {
                 setSelectedId(n.id);
               }
             }}
-            onDblClick={() => {
-              const t = window.prompt("Sửa ghi chú:", n.text);
-              if (t === null) return;
-              if (!t.trim()) {
-                setNotes((prev) => prev.filter((x) => x.id !== n.id));
-                setSelectedId(null);
-              } else {
-                setNotes((prev) => prev.map((x) => (x.id === n.id ? { ...x, text: t.trim() } : x)));
-              }
-            }}
+            onDblClick={() => openNoteEditor(n.id, n.x, n.y, n.text)}
             onDragEnd={(e) => {
               const { x, y } = e.target.position();
               setNotes((prev) => prev.map((x2) => (x2.id === n.id ? { ...x2, x, y } : x2)));
             }}
           />
-        ))}
+          )
+        )}
 
         <Transformer
           ref={trRef}
@@ -200,5 +241,34 @@ export function AnnotateCanvas(props: Props) {
         />
       </Layer>
     </Stage>
+
+    {editing && (
+      <input
+        ref={inputRef}
+        className="note-edit-input"
+        value={draft}
+        placeholder="Nhập ghi chú…"
+        style={{ left: editing.left, top: editing.top, color }}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            finishNote(true);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            finishNote(false);
+          }
+        }}
+        onBlur={() => {
+          // Bỏ qua blur "giả" ngay sau khi mở (do click trên canvas) — giữ lại focus
+          if (performance.now() - openedAt.current < 300) {
+            inputRef.current?.focus();
+            return;
+          }
+          finishNote(true);
+        }}
+      />
+    )}
+    </>
   );
 }

@@ -12,17 +12,19 @@ const PADDING = 24;
 interface Props {
   imageDataUrl: string;
   initialAnnotations?: Annotations | null;
+  initialTitle?: string;
   onBack: () => void;
-  onSaved: (flattened: Blob, original: Blob, annotations: Annotations) => void;
+  onSaved: (flattened: Blob, original: Blob, annotations: Annotations, title: string) => void;
 }
 
-export function EditorScreen({ imageDataUrl, initialAnnotations, onBack, onSaved }: Props) {
+export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, onBack, onSaved }: Props) {
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [boxes, setBoxes] = useState<Box[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [title, setTitle] = useState(initialTitle ?? "");
   const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
   const stageRef = useRef<Konva.Stage>(null);
   const appliedInit = useRef(false);
@@ -102,7 +104,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, onBack, onSaved
     const original = dataUrlToBlob(imageDataUrl);
 
     setSaving(false);
-    onSaved(blob, original, annotations);
+    onSaved(blob, original, annotations, title.trim());
   }
 
   return (
@@ -115,6 +117,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, onBack, onSaved
         onBack={onBack}
         onSave={handleSave}
         saving={saving}
+        title={title}
+        setTitle={setTitle}
       />
       <div className="canvas-area">
         {img && (

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "desktop",
+  "productName": "CaptureShare",
   "version": "0.1.0",
-  "identifier": "com.thiee.desktop",
+  "identifier": "com.thiee.captureshare",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "desktop",
-        "width": 800,
-        "height": 600
+        "title": "Chụp & Chia sẻ",
+        "width": 980,
+        "height": 680
       }
     ],
     "security": {
