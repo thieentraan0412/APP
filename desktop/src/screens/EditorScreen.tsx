@@ -3,7 +3,7 @@ import type Konva from "konva";
 import { AnnotateCanvas } from "../components/AnnotateCanvas";
 import { Toolbar } from "../components/Toolbar";
 import { flattenStage, dataUrlToBlob } from "../lib/flatten";
-import type { Annotations, Box, Note, Tool } from "../types";
+import type { Annotations, Arrow, Box, Note, StepMarker, Tool } from "../types";
 
 const COLOR = "#ff2d2d"; // màu khung + note (đỏ)
 const TOOLBAR_H = 56;
@@ -21,6 +21,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [boxes, setBoxes] = useState<Box[]>([]);
+  const [arrows, setArrows] = useState<Arrow[]>([]);
+  const [steps, setSteps] = useState<StepMarker[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -43,9 +45,14 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // Phím Delete → xoá phần tử đang chọn
+  // Phím tắt trong editor
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+        e.preventDefault();
+        handleSave();
+        return;
+      }
       if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
         deleteSelected();
       }
@@ -69,6 +76,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     if (initialAnnotations) {
       const s = fit.scale;
       setBoxes(initialAnnotations.boxes.map((b) => ({ ...b, x: b.x * s, y: b.y * s, w: b.w * s, h: b.h * s })));
+      setArrows((initialAnnotations.arrows ?? []).map((a) => ({ ...a, x1: a.x1 * s, y1: a.y1 * s, x2: a.x2 * s, y2: a.y2 * s })));
+      setSteps((initialAnnotations.steps ?? []).map((st) => ({ ...st, x: st.x * s, y: st.y * s })));
       setNotes(initialAnnotations.notes.map((n) => ({ ...n, x: n.x * s, y: n.y * s })));
     }
     appliedInit.current = true;
@@ -77,6 +86,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   function deleteSelected() {
     if (!selectedId) return;
     setBoxes((prev) => prev.filter((b) => b.id !== selectedId));
+    setArrows((prev) => prev.filter((a) => a.id !== selectedId));
+    setSteps((prev) => prev.filter((st) => st.id !== selectedId));
     setNotes((prev) => prev.filter((n) => n.id !== selectedId));
     setSelectedId(null);
   }
@@ -97,6 +108,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       imageW: img.width,
       imageH: img.height,
       boxes: boxes.map((b) => ({ ...b, x: b.x / s, y: b.y / s, w: b.w / s, h: b.h / s })),
+      arrows: arrows.map((a) => ({ ...a, x1: a.x1 / s, y1: a.y1 / s, x2: a.x2 / s, y2: a.y2 / s })),
+      steps: steps.map((st) => ({ ...st, x: st.x / s, y: st.y / s })),
       notes: notes.map((n) => ({ ...n, x: n.x / s, y: n.y / s })),
     };
 
@@ -131,6 +144,10 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
             setTool={setTool}
             boxes={boxes}
             setBoxes={setBoxes}
+            arrows={arrows}
+            setArrows={setArrows}
+            steps={steps}
+            setSteps={setSteps}
             notes={notes}
             setNotes={setNotes}
             selectedId={selectedId}
@@ -140,8 +157,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         )}
       </div>
       <p className="hint editor-hint">
-        Mẹo: chọn <b>Khung</b> rồi kéo chuột để kẻ ô; chọn <b>Ghi chú</b> rồi bấm để thêm chữ.
-        Bấm đúp ghi chú để sửa. Chọn phần tử rồi nhấn <b>Delete</b> để xoá.
+        Mẹo: <b>Khung</b> kéo vẽ ô · <b>Mũi tên</b> kéo vẽ · <b>Bước</b> bấm để đặt số thứ tự · <b>Ghi chú</b> bấm để thêm chữ (đúp để sửa).
+        Chọn phần tử rồi nhấn <b>Delete</b> để xoá.
       </p>
     </div>
   );

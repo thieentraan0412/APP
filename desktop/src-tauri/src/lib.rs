@@ -62,6 +62,11 @@ fn remove_temp(path: String) {
     let _ = std::fs::remove_file(path);
 }
 
+#[tauri::command]
+fn toggle_recording_cmd(app: AppHandle) {
+    record::toggle_recording(&app);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -139,7 +144,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             capture::capture_screen,
             set_shortcuts,
-            remove_temp
+            remove_temp,
+            toggle_recording_cmd
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

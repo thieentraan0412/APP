@@ -12,7 +12,8 @@ export function dataUrlToBlob(dataUrl: string): Blob {
 }
 
 // pixelRatio = ảnh gốc / ảnh hiển thị → xuất đúng độ phân giải gốc.
+// WebP quality 0.85 nhẹ hơn PNG ~60% với chất lượng gần như không đổi.
 export function flattenStage(stage: Konva.Stage, pixelRatio: number): Blob {
-  const dataUrl = stage.toDataURL({ mimeType: "image/png", pixelRatio });
+  const dataUrl = stage.toDataURL({ mimeType: "image/webp", quality: 0.85, pixelRatio });
   return dataUrlToBlob(dataUrl);
 }

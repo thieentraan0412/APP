@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Stage, Layer, Image as KImage, Rect, Text, Transformer } from "react-konva";
+import { Stage, Layer, Image as KImage, Rect, Text, Arrow as KArrow, Circle, Group, Transformer } from "react-konva";
 import type Konva from "konva";
 import { nanoid } from "nanoid";
-import type { Box, Note, Tool } from "../types";
+import type { Arrow, Box, Note, StepMarker, Tool } from "../types";
 
 interface Props {
   image: HTMLImageElement;
@@ -13,6 +13,10 @@ interface Props {
   setTool: (t: Tool) => void;
   boxes: Box[];
   setBoxes: React.Dispatch<React.SetStateAction<Box[]>>;
+  arrows: Arrow[];
+  setArrows: React.Dispatch<React.SetStateAction<Arrow[]>>;
+  steps: StepMarker[];
+  setSteps: React.Dispatch<React.SetStateAction<StepMarker[]>>;
   notes: Note[];
   setNotes: React.Dispatch<React.SetStateAction<Note[]>>;
   selectedId: string | null;
@@ -23,12 +27,13 @@ interface Props {
 export function AnnotateCanvas(props: Props) {
   const {
     image, width, height, color, tool, setTool,
-    boxes, setBoxes, notes, setNotes, selectedId, setSelectedId, stageRef,
+    boxes, setBoxes, arrows, setArrows, steps, setSteps, notes, setNotes, selectedId, setSelectedId, stageRef,
   } = props;
 
   const trRef = useRef<Konva.Transformer>(null);
   const boxRefs = useRef<Map<string, Konva.Rect>>(new Map());
   const drawing = useRef<{ id: string; sx: number; sy: number } | null>(null);
+  const arrowDrawing = useRef<{ id: string } | null>(null);
 
   // Sửa ghi chú trực tiếp tại vị trí note (thay cho prompt)
   const [editing, setEditing] = useState<{ id: string; left: number; top: number } | null>(null);
@@ -101,6 +106,25 @@ export function AnnotateCanvas(props: Props) {
       return;
     }
 
+    if (tool === "arrow") {
+      const id = nanoid(6);
+      arrowDrawing.current = { id };
+      setArrows((prev) => [...prev, { id, x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y, color }]);
+      setSelectedId(null);
+      return;
+    }
+
+    if (tool === "step") {
+      // chỉ đặt khi click vào nền, không vào element đang có
+      if (e.target !== stage && e.target.name() !== "bg") return;
+      const id = nanoid(6);
+      const nextStep = Math.max(0, ...steps.map((s) => s.step)) + 1;
+      setSteps((prev) => [...prev, { id, x: pos.x, y: pos.y, step: nextStep, color }]);
+      setSelectedId(id);
+      setTool("select");
+      return;
+    }
+
     if (tool === "note") {
       const id = nanoid(6);
       setNotes((prev) => [...prev, { id, x: pos.x, y: pos.y, text: "", color }]);
@@ -117,27 +141,47 @@ export function AnnotateCanvas(props: Props) {
   }
 
   function onMouseMove(e: Konva.KonvaEventObject<MouseEvent>) {
-    if (!drawing.current) return;
     const stage = e.target.getStage();
     const pos = stage?.getPointerPosition();
     if (!pos) return;
-    const { id, sx, sy } = drawing.current;
-    const x = Math.min(sx, pos.x), y = Math.min(sy, pos.y);
-    const w = Math.abs(pos.x - sx), h = Math.abs(pos.y - sy);
-    setBoxes((prev) => prev.map((b) => (b.id === id ? { ...b, x, y, w, h } : b)));
+
+    if (drawing.current) {
+      const { id, sx, sy } = drawing.current;
+      const x = Math.min(sx, pos.x), y = Math.min(sy, pos.y);
+      const w = Math.abs(pos.x - sx), h = Math.abs(pos.y - sy);
+      setBoxes((prev) => prev.map((b) => (b.id === id ? { ...b, x, y, w, h } : b)));
+    }
+
+    if (arrowDrawing.current) {
+      const { id } = arrowDrawing.current;
+      setArrows((prev) => prev.map((a) => (a.id === id ? { ...a, x2: pos.x, y2: pos.y } : a)));
+    }
   }
 
   function onMouseUp() {
-    if (!drawing.current) return;
-    const id = drawing.current.id;
-    drawing.current = null;
-    setBoxes((prev) => {
-      const b = prev.find((x) => x.id === id);
-      if (b && (b.w < 5 || b.h < 5)) return prev.filter((x) => x.id !== id); // bỏ khung quá nhỏ
-      return prev;
-    });
-    setSelectedId(id);
-    setTool("select");
+    if (drawing.current) {
+      const id = drawing.current.id;
+      drawing.current = null;
+      setBoxes((prev) => {
+        const b = prev.find((x) => x.id === id);
+        if (b && (b.w < 5 || b.h < 5)) return prev.filter((x) => x.id !== id);
+        return prev;
+      });
+      setSelectedId(id);
+      setTool("select");
+    }
+
+    if (arrowDrawing.current) {
+      const id = arrowDrawing.current.id;
+      arrowDrawing.current = null;
+      setArrows((prev) => {
+        const a = prev.find((x) => x.id === id);
+        if (a && Math.hypot(a.x2 - a.x1, a.y2 - a.y1) < 10) return prev.filter((x) => x.id !== id);
+        return prev;
+      });
+      setSelectedId(id);
+      setTool("select");
+    }
   }
 
   return (
@@ -168,7 +212,7 @@ export function AnnotateCanvas(props: Props) {
             stroke={b.color}
             strokeWidth={3}
             strokeScaleEnabled={false}
-            fill={b.color + "22"}
+            fill="transparent"
             draggable={tool === "select"}
             onMouseDown={(e) => {
               if (tool === "select") {
@@ -200,6 +244,83 @@ export function AnnotateCanvas(props: Props) {
               );
             }}
           />
+        ))}
+
+        {arrows.map((a) => (
+          <KArrow
+            key={a.id}
+            x={a.x1}
+            y={a.y1}
+            points={[0, 0, a.x2 - a.x1, a.y2 - a.y1]}
+            stroke={a.color}
+            strokeWidth={a.id === selectedId ? 5 : 3}
+            fill={a.color}
+            pointerLength={14}
+            pointerWidth={10}
+            strokeScaleEnabled={false}
+            opacity={a.id === selectedId ? 1 : 0.85}
+            draggable={tool === "select"}
+            onMouseDown={(e) => {
+              if (tool === "select") {
+                e.cancelBubble = true;
+                setSelectedId(a.id);
+              }
+            }}
+            onDragEnd={(e) => {
+              const newX1 = e.target.x();
+              const newY1 = e.target.y();
+              setArrows((prev) =>
+                prev.map((a2) => {
+                  if (a2.id !== a.id) return a2;
+                  const dx = newX1 - a2.x1;
+                  const dy = newY1 - a2.y1;
+                  return { ...a2, x1: newX1, y1: newY1, x2: a2.x2 + dx, y2: a2.y2 + dy };
+                })
+              );
+            }}
+          />
+        ))}
+
+        {steps.map((s) => (
+          <Group
+            key={s.id}
+            x={s.x}
+            y={s.y}
+            draggable={tool === "select"}
+            onMouseDown={(e) => {
+              if (tool === "select") {
+                e.cancelBubble = true;
+                setSelectedId(s.id);
+              }
+            }}
+            onDragEnd={(e) => {
+              const { x, y } = e.target.position();
+              setSteps((prev) => prev.map((s2) => (s2.id === s.id ? { ...s2, x, y } : s2)));
+            }}
+          >
+            <Circle
+              radius={18}
+              fill={s.color}
+              stroke="white"
+              strokeWidth={s.id === selectedId ? 3 : 0}
+              shadowColor="rgba(0,0,0,0.4)"
+              shadowBlur={4}
+              shadowOffsetY={2}
+            />
+            <Text
+              text={String(s.step)}
+              fontSize={s.step > 9 ? 13 : 15}
+              fontStyle="bold"
+              fill="white"
+              width={36}
+              height={36}
+              offsetX={18}
+              offsetY={18}
+              align="center"
+              verticalAlign="middle"
+              listening={false}
+            />
+          </Group>
         ))}
 
         {notes.map((n) =>

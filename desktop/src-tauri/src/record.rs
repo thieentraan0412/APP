@@ -36,18 +36,14 @@ fn start(app: &AppHandle) {
 
     let cmd = sidecar.args([
         "-y",
-        "-f",
-        "gdigrab",
-        "-framerate",
-        "30",
-        "-i",
-        "desktop",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-pix_fmt",
-        "yuv420p",
+        "-f", "gdigrab",
+        "-framerate", "24",       // 24fps thay vì 30 → nhẹ hơn ~20%
+        "-i", "desktop",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",   // giữ ultrafast để không delay khi record
+        "-crf", "28",             // CRF 28: cân bằng chất/nặng (default ~23 → file to hơn nhiều)
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart", // metadata đầu file → stream nhanh hơn
         out_str.as_str(),
     ]);
 

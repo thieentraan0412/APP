@@ -29,4 +29,5 @@ base64 = "0.22.1"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-fs = "2.5.1"
+arboard = "3"
 

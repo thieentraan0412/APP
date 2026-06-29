@@ -22,6 +22,12 @@ export function Toolbar(props: Props) {
       <button className={tool === "box" ? "active" : ""} onClick={() => setTool("box")}>
         ▭ Khung
       </button>
+      <button className={tool === "arrow" ? "active" : ""} onClick={() => setTool("arrow")}>
+        → Mũi tên
+      </button>
+      <button className={tool === "step" ? "active" : ""} onClick={() => setTool("step")}>
+        ① Bước
+      </button>
       <button className={tool === "note" ? "active" : ""} onClick={() => setTool("note")}>
         🏷 Ghi chú
       </button>

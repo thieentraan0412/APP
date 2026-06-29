@@ -243,3 +243,175 @@ Mỗi lần thực hiện một checklist --> Sau khi thực hiện xong thì ti
 - [ ] Annotate cho video
 - [ ] Nén ảnh/video trước khi upload
 - [ ] Lịch sử + tìm kiếm + xoá nội dung
+
+---
+
+## Ý tưởng tính năng mới (Roadmap v2)
+
+> Các tính năng được nhóm theo mức độ ưu tiên và độ phức tạp. Đánh dấu ☐ khi bắt đầu làm, tick ✅ khi xong.
+
+---
+
+### Nhóm A — Công cụ chỉnh sửa nâng cao (Editor)
+
+- [x] **Thêm công cụ vẽ: mũi tên (Arrow)**
+  > Vẽ mũi tên chỉ vào vùng cần chú ý. Dùng Konva Line + Arrow. Hỗ trợ chọn/di chuyển/xoá như khung hiện tại.
+  > *Tại sao:* mũi tên là công cụ annotate phổ biến nhất trong screenshot tool (Skitch, Greenshot, ShareX đều có).
+  > ✅ Đã làm: thêm `Arrow` interface vào types.ts, tool `"arrow"` vào Toolbar, render `<KArrow>` trong AnnotateCanvas (kéo vẽ, chọn/di chuyển/xoá bằng Delete), save/load annotations đầy đủ.
+
+- [ ] **Blur / che thông tin nhạy cảm (Mosaic tool)**
+  > Vẽ vùng chữ nhật → pixel trong vùng đó bị làm mờ (Gaussian blur hoặc pixelate) trước khi lưu.
+  > *Tại sao:* cần che email, số điện thoại, mật khẩu khi share ảnh chụp màn hình. Implement: vẽ Rect màu mờ trên canvas, khi flatten dùng `ctx.filter = blur`.
+
+- [x] **Công cụ đánh số thứ tự (Step marker)**
+  > Click để đặt vòng tròn có số (1, 2, 3…) — dùng để hướng dẫn từng bước thao tác.
+  > *Tại sao:* rất hữu ích khi viết hướng dẫn. Implement: thêm kiểu shape `step` vào types.ts, vẽ Circle + Text trong Konva.
+  > ✅ Đã làm: `StepMarker` interface, tool `"step"` vào Toolbar (nút ① Bước), render `<Group><Circle><Text>` trong Konva — click đặt số tự tăng, kéo di chuyển, Delete xoá, save/load scale đầy đủ.
+
+- [ ] **Undo / Redo trong editor (Ctrl+Z / Ctrl+Y)**
+  > Lưu lịch sử thao tác (mảng snapshot), Ctrl+Z pop về trạng thái trước.
+  > *Tại sao:* hiện tại lỡ xoá nhầm phải làm lại từ đầu — ảnh hưởng trải nghiệm nhiều nhất.
+
+- [ ] **Chọn màu tự do cho khung và note**
+  > Thêm color picker (input type=color hoặc thư viện nhỏ) vào Toolbar, áp dụng cho shape/note đang vẽ.
+  > *Tại sao:* hiện tại màu cố định đỏ. Người dùng muốn dùng màu khác nhau để phân loại vùng chú ý.
+
+- [ ] **Chụp vùng chọn (Region capture) thay vì toàn màn hình**
+  > Sau khi bấm Ctrl+Shift+1, hiện overlay mờ toàn màn hình cho kéo chọn vùng muốn chụp.
+  > *Tại sao:* chụp toàn màn hình thường chứa quá nhiều thứ thừa. Implement ở Rust: tạo cửa sổ transparent fullscreen để user kéo chọn rồi crop ảnh.
+
+---
+
+### Nhóm B — Chụp & Quay nâng cao (Capture)
+
+- [ ] **Chụp cửa sổ ứng dụng cụ thể (Window capture)**
+  > Liệt kê danh sách cửa sổ đang mở, cho chọn 1 cửa sổ để chụp riêng nó.
+  > *Tại sao:* crate `xcap` đã hỗ trợ `Window::all()` — chỉ cần thêm command Rust và màn hình chọn cửa sổ ở frontend.
+
+- [ ] **Chụp có đếm ngược (Countdown timer)**
+  > Bấm chụp → đếm ngược 3 giây rồi mới chụp — để kịp chuẩn bị màn hình.
+  > *Tại sao:* cần thiết khi chụp tooltip, dropdown hoặc trạng thái hover. Implement: `thread::sleep` trong Rust hoặc đếm ở frontend rồi gọi lệnh chụp.
+
+- [ ] **Quay video chọn màn hình / cửa sổ cụ thể (Multi-monitor)**
+  > Khi có nhiều màn hình, cho chọn màn hình nào sẽ được quay thay vì mặc định màn hình 1.
+  > *Tại sao:* người dùng nhiều màn hình rất cần tính năng này. ffmpeg hỗ trợ qua `-offset_x/-offset_y -video_size`.
+
+- [ ] **Xuất GIF từ video quay ngắn**
+  > Sau khi quay video ngắn (< 30s), thêm nút "Xuất GIF" — dùng ffmpeg chuyển mp4 → gif rồi upload.
+  > *Tại sao:* GIF dễ nhúng vào Slack, GitHub, Notion hơn video mp4. ffmpeg: `ffmpeg -i in.mp4 -vf "fps=10,scale=800:-1" out.gif`.
+
+- [ ] **Tự động chụp theo lịch (Scheduled capture)**
+  > Cài đặt chụp màn hình tự động mỗi X phút (5/10/30 phút), lưu thẳng lên cloud.
+  > *Tại sao:* hữu ích để theo dõi tiến độ làm việc theo thời gian (time-lapse công việc).
+
+---
+
+### Nhóm C — Chia sẻ & Bảo mật (Share)
+
+- [ ] **Link có mật khẩu (Password-protected link)**
+  > Khi lưu, cho đặt mật khẩu tuỳ chọn. Trang `/v/:id` yêu cầu nhập mật khẩu trước khi xem.
+  > *Tại sao:* chia sẻ nội dung nội bộ, không muốn ai có link cũng xem được.
+  > *Backend:* lưu hash mật khẩu vào D1, Worker kiểm tra qua POST form trước khi stream file.
+
+- [ ] **Link có thời hạn (Expiring link)**
+  > Khi upload, chọn thời hạn: 1h / 24h / 7 ngày / vĩnh viễn. Worker kiểm tra `expires_at` trước khi trả file.
+  > *Tại sao:* tránh nội dung tồn tại mãi trên cloud, phù hợp share tạm thời.
+  > *Backend:* thêm cột `expires_at INTEGER` vào bảng `items`, thêm Cron Trigger dọn bản ghi hết hạn.
+
+- [ ] **Chia sẻ nhanh lên clipboard không upload (Local copy)**
+  > Thêm nút/phím tắt "Chỉ copy ảnh" — flatten ảnh + annotate rồi copy thẳng vào clipboard dưới dạng image, không upload lên cloud.
+  > *Tại sao:* đôi khi chỉ cần paste vào Slack/Discord/email mà không cần link.
+  > *Implement:* Tauri clipboard API hỗ trợ write image.
+
+- [ ] **Chia sẻ nhanh lên Slack / Discord webhook**
+  > Trong Cài đặt, nhập Webhook URL của Slack/Discord. Sau khi upload, nút "Gửi lên Slack" post link vào channel.
+  > *Tại sao:* workflow phổ biến nhất: chụp bug → share ngay vào channel team mà không cần mở Slack.
+
+- [ ] **QR code cho link chia sẻ**
+  > Hiện QR code của link ngay trên màn hình kết quả — dùng thư viện `qrcode` nhỏ ở frontend.
+  > *Tại sao:* dễ share sang điện thoại hoặc trình chiếu (presentation).
+
+---
+
+### Nhóm D — Thư viện & Tổ chức (Library)
+
+- [ ] **Tìm kiếm và lọc trong thư viện**
+  > Ô tìm kiếm lọc theo tiêu đề; filter theo loại (ảnh/video); sắp xếp theo ngày mới/cũ.
+  > *Tại sao:* khi thư viện nhiều mục, không có tìm kiếm rất khó dùng.
+  > *Backend:* thêm `LIKE` query trong `GET /api/items`, hoặc filter ở frontend với dữ liệu đã load.
+
+- [ ] **Tags / nhãn cho mỗi capture**
+  > Gắn tag (bug, design, tutorial…) khi lưu. Lọc thư viện theo tag.
+  > *Tại sao:* phân loại nội dung khi dùng lâu dài. Lưu tags vào cột JSON trong D1.
+
+- [ ] **Chọn nhiều mục — xoá/copy link hàng loạt (Batch actions)**
+  > Checkbox trên mỗi thẻ thư viện, thanh action nổi lên khi chọn ≥ 1 mục: "Xoá tất cả", "Copy tất cả link".
+  > *Tại sao:* xoá từng mục một rất chậm khi dọn thư viện.
+
+- [ ] **Pinned / Ghim mục quan trọng**
+  > Ghim capture lên đầu thư viện, không bị đẩy xuống khi có mục mới.
+  > *Backend:* thêm cột `pinned BOOLEAN DEFAULT 0`, sort `pinned DESC, created_at DESC`.
+
+- [ ] **Xem trước ảnh toàn màn hình (Lightbox)**
+  > Click vào thumbnail trong thư viện → mở ảnh to toàn cửa sổ với nút Prev/Next.
+  > *Tại sao:* thumbnail nhỏ khó xem chi tiết, phải mở link trên trình duyệt.
+
+---
+
+### Nhóm E — Trải nghiệm & Hiệu năng (UX/Performance)
+
+- [ ] **Dark mode / Light mode**
+  > Thêm toggle theme trong Cài đặt; lưu preference vào localStorage.
+  > *Tại sao:* app hiện chỉ có light mode — người dùng ban đêm hoặc thích dark mode không có lựa chọn.
+
+- [ ] **Nén ảnh trước khi upload (Image compression)**
+  > Trước khi upload, resize ảnh về tối đa 2560px và nén quality 85% bằng Canvas API.
+  > *Tại sao:* ảnh 4K chụp toàn màn hình có thể > 5MB — nén xuống ~500KB giúp upload nhanh hơn 10x.
+
+- [ ] **Thông báo hệ thống (System notification)**
+  > Sau khi upload xong, hiện Windows notification nhỏ "✓ Đã copy link" dù cửa sổ app đang ẩn.
+  > *Implement:* `tauri-plugin-notification`.
+
+- [ ] **Lưu ảnh ra file local (Save to disk)**
+  > Thêm nút "Lưu về máy" trong editor và thư viện — lưu file PNG/MP4 ra thư mục tự chọn.
+  > *Tại sao:* đôi khi chỉ cần lưu file, không cần upload.
+
+- [ ] **Lịch sử clipboard (Clipboard history)**
+  > Giữ lại 10 link gần nhất đã copy — xem lại và copy lại từ tray menu mà không cần mở thư viện.
+  > *Tại sao:* lỡ mất link vừa copy do copy thứ khác vào clipboard rất hay gặp.
+
+- [ ] **Icon app riêng + splash screen**
+  > Thiết kế icon .ico cho app (hiện đang dùng icon mặc định Tauri). Thêm splash screen loading ngắn.
+  > *Tại sao:* app đang dùng icon placeholder — ảnh hưởng tính chuyên nghiệp khi chạy ở tray.
+
+---
+
+### Nhóm F — Đăng nhập & Đa thiết bị (Auth / Sync)
+
+- [ ] **Đăng nhập bằng Google / GitHub (OAuth)**
+  > Người dùng đăng nhập → capture gắn với tài khoản → xem thư viện của mình từ bất kỳ thiết bị nào.
+  > *Implement:* Cloudflare Access hoặc tự build OAuth flow trong Worker + lưu `user_id` vào D1.
+
+- [ ] **Thư viện riêng theo tài khoản**
+  > `GET /api/items` chỉ trả về items của `user_id` đang đăng nhập, không lộ data người khác.
+  > *Phụ thuộc:* Nhóm F — Đăng nhập.
+
+- [ ] **Giới hạn dung lượng theo tài khoản (Storage quota)**
+  > Mỗi tài khoản có quota (ví dụ 1GB free). Hiện thanh dung lượng trong Cài đặt.
+  > *Backend:* SUM size từ D1, so sánh với quota khi upload.
+
+---
+
+### Nhóm G — Tích hợp & API (Integration)
+
+- [ ] **Browser extension (Chrome/Firefox)**
+  > Extension cho phép chụp tab đang xem, crop vùng chọn ngay trên trình duyệt rồi upload lên cùng backend.
+  > *Tại sao:* mở rộng usecase sang web — không cần cài app desktop.
+
+- [ ] **API public cho developer**
+  > Tài liệu API công khai + API key cá nhân để tích hợp từ tool khác (CI/CD paste screenshot, script tự động).
+  > *Backend:* thêm bảng `api_keys`, middleware xác thực, trang tạo key trong Settings.
+
+- [ ] **Zapier / Make (Automation) webhook**
+  > Sau mỗi lần upload, Worker gọi webhook URL đã cấu hình — tích hợp với Zapier, Make, n8n để tự động hoá luồng.
+  > *Ví dụ:* upload ảnh → tự tạo Jira ticket, gửi email, lưu vào Notion.

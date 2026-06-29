@@ -61,8 +61,8 @@ export async function uploadImage(
   title = ""
 ): Promise<UploadResult> {
   const form = new FormData();
-  form.append("file", flattened, "image.png");
-  form.append("original", original, "original.png");
+  form.append("file", flattened, "image.webp");
+  form.append("original", original, "original.webp");
   form.append("type", "image");
   form.append("annotations", JSON.stringify(annotations));
   form.append("title", title);
@@ -113,7 +113,7 @@ export async function updateItem(
   title = ""
 ): Promise<{ url: string }> {
   const form = new FormData();
-  form.append("file", flattened, "image.png");
+  form.append("file", flattened, "image.webp");
   form.append("annotations", JSON.stringify(annotations));
   form.append("title", title);
   return patchItem(id, form);
@@ -134,6 +134,21 @@ async function patchItem(id: string, form: FormData): Promise<{ url: string }> {
   });
   if (!res.ok) throw new Error(`Cập nhật thất bại (HTTP ${res.status})`);
   return res.json();
+}
+
+export interface UsageStats {
+  totalItems: number;
+  imageCount: number;
+  videoCount: number;
+  estimatedMB: number;
+}
+
+export function calcStats(items: LibraryItem[]): UsageStats {
+  const imageCount = items.filter((i) => i.type === "image").length;
+  const videoCount = items.filter((i) => i.type === "video").length;
+  // Sau tối ưu: ảnh WebP ~0.4MB, video CRF28/24fps ~6MB trung bình
+  const estimatedMB = imageCount * 0.4 + videoCount * 6;
+  return { totalItems: items.length, imageCount, videoCount, estimatedMB };
 }
 
 // Tải một URL ảnh về dạng data URL (để mở lại trong editor khi sửa)

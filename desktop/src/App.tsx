@@ -7,6 +7,8 @@ import { readFile } from "@tauri-apps/plugin-fs";
 import { EditorScreen } from "./screens/EditorScreen";
 import { LibraryScreen } from "./screens/LibraryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
+import { ConfirmModal } from "./components/ConfirmModal";
+import { UsageScreen } from "./screens/UsageScreen";
 import {
   uploadImage,
   uploadVideo,
@@ -16,15 +18,82 @@ import {
   updateItem,
   updateTitle,
   fetchAsDataUrl,
+  calcStats,
   type LibraryItem,
+  type UsageStats,
 } from "./lib/api";
 import type { Annotations } from "./types";
 import "./App.css";
 
-type Screen = "home" | "editor" | "result" | "library" | "settings";
+type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage";
 
 const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2" };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
+
+const SidebarS = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+
+const USAGE_LIMITS = {
+  r2StorageMB: 10 * 1024, r2ClassAPerMonth: 1_000_000, r2ClassBPerMonth: 10_000_000,
+  d1StorageMB: 500, d1RowsReadPerDay: 5_000_000, d1RowsWritePerDay: 100_000, workersReqPerDay: 100_000,
+};
+
+function checkUsageWarnings(stats: UsageStats): string[] {
+  const s = stats;
+  const estR2MB   = s.estimatedMB;
+  const estOpsA   = s.totalItems * 2;
+  const estOpsB   = s.totalItems * 10;
+  const estD1MB   = s.totalItems * 0.002;
+  const estD1R    = s.totalItems * 5;
+  const estWrkDay = Math.round(s.totalItems * 12 / 30);
+  const warns: string[] = [];
+  if (estR2MB   / USAGE_LIMITS.r2StorageMB      >= 0.9) warns.push(`R2 Storage đạt ${((estR2MB/USAGE_LIMITS.r2StorageMB)*100).toFixed(0)}% (giới hạn 10 GB)`);
+  if (estOpsA   / USAGE_LIMITS.r2ClassAPerMonth  >= 0.9) warns.push(`R2 Write ops đạt ${((estOpsA/USAGE_LIMITS.r2ClassAPerMonth)*100).toFixed(0)}% (giới hạn 1M/tháng)`);
+  if (estOpsB   / USAGE_LIMITS.r2ClassBPerMonth  >= 0.9) warns.push(`R2 Read ops đạt ${((estOpsB/USAGE_LIMITS.r2ClassBPerMonth)*100).toFixed(0)}% (giới hạn 10M/tháng)`);
+  if (estD1MB   / USAGE_LIMITS.d1StorageMB       >= 0.9) warns.push(`D1 Storage đạt ${((estD1MB/USAGE_LIMITS.d1StorageMB)*100).toFixed(0)}% (giới hạn 500 MB)`);
+  if (estD1R    / USAGE_LIMITS.d1RowsReadPerDay  >= 0.9) warns.push(`D1 Rows read đạt ${((estD1R/USAGE_LIMITS.d1RowsReadPerDay)*100).toFixed(0)}% (giới hạn 5M/ngày)`);
+  if (estWrkDay / USAGE_LIMITS.workersReqPerDay  >= 0.9) warns.push(`Workers Requests đạt ${((estWrkDay/USAGE_LIMITS.workersReqPerDay)*100).toFixed(0)}% (giới hạn 100K/ngày)`);
+  return warns;
+}
+
+function GlobalSidebar({ screen, onHome, onCapture, onRecord, onUsage, onSettings, recording, usageWarnings }: {
+  screen: Screen; onHome: () => void; onCapture: () => void; onRecord: () => void;
+  onUsage: () => void; onSettings: () => void; recording: boolean; usageWarnings: string[];
+}) {
+  const hasWarn = usageWarnings.length > 0;
+  return (
+    <nav className="lib-sidebar">
+      <button className={`lib-tool${screen === "library" ? " lib-tool--active" : ""}`} onClick={onHome} title="Trang chủ">
+        <svg {...SidebarS}><path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9.5Z"/><polyline points="9 21 9 12 15 12 15 21"/></svg>
+      </button>
+      <button className="lib-tool" onClick={onCapture} title="Chụp ảnh">
+        <svg {...SidebarS}><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      </button>
+      <button className={`lib-tool${recording ? " lib-tool--recording" : ""}`} onClick={onRecord} title="Quay / dừng video">
+        <svg {...SidebarS}><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>
+      </button>
+      <div className="lib-spacer"/>
+      <button
+        className={`lib-tool${screen === "usage" ? " lib-tool--active" : ""}`}
+        onClick={onUsage}
+        title={hasWarn ? `⚠️ Sắp đạt giới hạn Cloudflare` : "Mức sử dụng"}
+        style={{ position: "relative" }}
+      >
+        <svg {...SidebarS}><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        {hasWarn && (
+          <span style={{
+            position: "absolute", top: 6, right: 6, width: 8, height: 8,
+            borderRadius: "50%", background: "#ef4444",
+            border: "1.5px solid #1c1c1e",
+            animation: "warn-pulse 1.8s ease-in-out infinite",
+          }}/>
+        )}
+      </button>
+      <button className={`lib-tool${screen === "settings" ? " lib-tool--active" : ""}`} onClick={onSettings} title="Cài đặt">
+        <svg {...SidebarS}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 5a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 15 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>
+      </button>
+    </nav>
+  );
+}
 
 function prettyKey(s: string): string {
   return s.replace("Control", "Ctrl").replace("Super", "Win").split("+").join("+");
@@ -36,12 +105,18 @@ function fmtTime(sec: number): string {
 }
 
 function App() {
-  const [screen, setScreen] = useState<Screen>("home");
+  const [screen, setScreen] = useState<Screen>("library");
   const [image, setImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
+  const [recPopup, setRecPopup] = useState<"start" | "stop" | null>(null);
+  const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageWarnings, setUsageWarnings] = useState<string[]>([]);
+  const [warnDismissed, setWarnDismissed] = useState(false);
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
 
   // Sửa annotate
@@ -78,8 +153,16 @@ function App() {
         setScreen("editor");
       }),
       listen<string>("capture-error", (e) => setError(e.payload)),
-      listen("recording-started", () => setRecording(true)),
-      listen("recording-stopped", () => setRecording(false)),
+      listen("recording-started", () => {
+        setRecording(true);
+        setRecPopup("start");
+        window.setTimeout(() => setRecPopup(null), 1000);
+      }),
+      listen("recording-stopped", () => {
+        setRecording(false);
+        setRecPopup("stop");
+        window.setTimeout(() => setRecPopup(null), 1000);
+      }),
       listen<string>("video-ready", (e) => handleVideoReady(e.payload)),
       listen<string>("video-error", (e) => {
         setRecording(false);
@@ -91,7 +174,7 @@ function App() {
     return () => subs.forEach((p) => p.then((f) => f()));
   }, []);
 
-  // Tải phím tắt đã lưu và áp dụng khi mở app
+  // Tải phím tắt đã lưu và áp dụng khi mở app + load thư viện ngay
   useEffect(() => {
     try {
       const saved = localStorage.getItem("shortcuts");
@@ -99,7 +182,17 @@ function App() {
       setShortcuts(cfg);
       invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record }).catch(() => {});
     } catch {}
+    openLibrary();
+    loadUsageStats(true); // load thầm lặng để hiện badge cảnh báo ngay từ đầu
   }, []);
+
+  // ESC trên màn hình result → quay về trang chủ
+  useEffect(() => {
+    if (screen !== "result") return;
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") backHome(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [screen]);
 
   // Đếm thời gian khi đang quay video
   useEffect(() => {
@@ -221,6 +314,27 @@ function App() {
     }
   }
 
+  async function loadUsageStats(silent = false) {
+    if (!silent) setUsageLoading(true);
+    try {
+      const items = await listItems();
+      const stats = calcStats(items);
+      setUsageStats(stats);
+      const warns = checkUsageWarnings(stats);
+      setUsageWarnings(warns);
+      if (warns.length > 0) setWarnDismissed(false);
+    } catch {
+      if (!silent) setUsageStats(null);
+    } finally {
+      if (!silent) setUsageLoading(false);
+    }
+  }
+
+  async function openUsage() {
+    setScreen("usage");
+    await loadUsageStats();
+  }
+
   async function onEditItem(item: LibraryItem) {
     try {
       const detail = await getItem(item.id);
@@ -240,14 +354,22 @@ function App() {
   }
 
   async function onDeleteItem(id: string) {
-    if (!window.confirm("Xoá nội dung này? Không thể hoàn tác.")) return;
-    try {
-      await deleteItem(id);
-      setLibItems((prev) => prev.filter((x) => x.id !== id));
-      showToast("Đã xoá");
-    } catch (err) {
-      showToast("Xoá lỗi: " + String(err));
-    }
+    return new Promise<void>((resolve) => {
+      setConfirm({
+        message: "Xoá nội dung này? Không thể hoàn tác.",
+        onConfirm: async () => {
+          setConfirm(null);
+          try {
+            await deleteItem(id);
+            setLibItems((prev) => prev.filter((x) => x.id !== id));
+            showToast("Đã xoá");
+          } catch (err) {
+            showToast("Xoá lỗi: " + String(err));
+          }
+          resolve();
+        },
+      });
+    });
   }
 
   async function onSaveTitle(id: string, title: string) {
@@ -292,55 +414,118 @@ function App() {
   }
 
   function backHome() {
-    setScreen("home");
     setImage(null);
     setEditId(null);
     setInitialAnnotations(null);
+    openLibrary();
   }
+
+  const RecPopupOverlay = recPopup ? (
+    <div className={`rec-popup ${recPopup}`}>
+      {recPopup === "start" ? "⏺ Bắt đầu quay" : "⏹ Đã dừng quay"}
+    </div>
+  ) : null;
+
+  const ConfirmOverlay = confirm ? (
+    <ConfirmModal
+      message={confirm.message}
+      onConfirm={confirm.onConfirm}
+      onCancel={() => setConfirm(null)}
+    />
+  ) : null;
 
   if (screen === "editor" && image) {
     return (
-      <EditorScreen
-        imageDataUrl={image}
-        initialAnnotations={initialAnnotations}
-        initialTitle={editTitle}
-        onBack={editId ? openLibrary : backHome}
-        onSaved={handleSaved}
-      />
-    );
-  }
-
-  if (screen === "library") {
-    return (
       <>
-        {toast && <div className="toast">{toast}</div>}
-        <LibraryScreen
-          items={libItems}
-          loading={libLoading}
-          error={libError}
-          onRefresh={openLibrary}
-          onBack={backHome}
-          onCopy={copyUrl}
-          onOpen={(u) => openUrl(u)}
-          onDelete={onDeleteItem}
-          onEdit={onEditItem}
-          onSaveTitle={onSaveTitle}
+        <EditorScreen
+          imageDataUrl={image}
+          initialAnnotations={initialAnnotations}
+          initialTitle={editTitle}
+          onBack={editId ? openLibrary : backHome}
+          onSaved={handleSaved}
         />
+        {RecPopupOverlay}
+        {ConfirmOverlay}
       </>
     );
   }
 
-  if (screen === "settings") {
+  const toggleRecord = () => invoke("toggle_recording_cmd").catch(() => {});
+
+  if (screen === "library" || screen === "usage" || screen === "settings") {
     return (
-      <>
+      <div className="lib-layout">
         {toast && <div className="toast">{toast}</div>}
-        <SettingsScreen
-          capture={shortcuts.capture}
-          record={shortcuts.record}
-          onSave={onSaveShortcuts}
-          onBack={() => setScreen("home")}
+        {RecPopupOverlay}
+        {ConfirmOverlay}
+        <GlobalSidebar
+          screen={screen}
+          onHome={backHome}
+          onCapture={manualCapture}
+          onRecord={toggleRecord}
+          onUsage={openUsage}
+          onSettings={() => setScreen("settings")}
+          recording={recording}
+          usageWarnings={usageWarnings}
         />
-      </>
+        <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          {/* Banner cảnh báo giới hạn Cloudflare */}
+          {usageWarnings.length > 0 && !warnDismissed && screen !== "usage" && (
+            <div style={{
+              background: "#fff7ed", borderBottom: "1px solid #fed7aa",
+              padding: "10px 20px", display: "flex", alignItems: "flex-start", gap: 10, flexShrink: 0,
+            }}>
+              <span style={{ fontSize: 16, lineHeight: 1.4 }}>⚠️</span>
+              <div style={{ flex: 1 }}>
+                <span style={{ fontWeight: 700, fontSize: 13, color: "#c2410c" }}>Sắp đạt giới hạn Cloudflare miễn phí — </span>
+                <span style={{ fontSize: 12.5, color: "#9a3412" }}>{usageWarnings.join(" · ")}</span>
+              </div>
+              <button
+                onClick={() => setWarnDismissed(true)}
+                style={{ background: "none", border: "none", cursor: "pointer", color: "#c2410c", fontSize: 16, lineHeight: 1, padding: "0 2px", flexShrink: 0 }}
+                title="Đóng"
+              >✕</button>
+            </div>
+          )}
+          {screen === "library" && (
+            <>
+              {recording && (
+                <div className={"rec-banner" + (recordSeconds >= VIDEO_WARN_SECONDS ? " warn" : "")}>
+                  ● Đang quay {fmtTime(recordSeconds)} — nhấn <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng
+                  {recordSeconds >= VIDEO_WARN_SECONDS && " ⚠️ video đã khá dài, cân nhắc dừng"}
+                </div>
+              )}
+              {error && <p className="error" style={{ margin: "0.5rem 1.5rem 0" }}>Lỗi: {error}</p>}
+              <LibraryScreen
+                items={libItems}
+                loading={libLoading}
+                error={libError}
+                onRefresh={openLibrary}
+                onCopy={copyUrl}
+                onOpen={(u) => openUrl(u)}
+                onDelete={onDeleteItem}
+                onEdit={onEditItem}
+                onSaveTitle={onSaveTitle}
+              />
+            </>
+          )}
+          {screen === "usage" && (
+            <UsageScreen
+              stats={usageStats}
+              loading={usageLoading}
+              onRefresh={openUsage}
+            />
+          )}
+          {screen === "settings" && (
+            <SettingsScreen
+              capture={shortcuts.capture}
+              record={shortcuts.record}
+              onSave={onSaveShortcuts}
+              onBack={backHome}
+            />
+          )}
+        </div>
+      </div>
     );
   }
 
@@ -348,6 +533,8 @@ function App() {
     return (
       <main className="container">
         {toast && <div className="toast">{toast}</div>}
+        {RecPopupOverlay}
+        {ConfirmOverlay}
         <div className="topbar">
           <span className="badge">
             {uploading ? "Đang tải lên…" : uploadError ? "Lỗi" : "Đã lưu ✓"}
@@ -367,6 +554,21 @@ function App() {
               {copied ? "Đã copy ✓" : "Copy link"}
             </button>
             <button onClick={() => openUrl(link)}>Mở link</button>
+            {resultId && !uploading && (
+              <button
+                style={{ color: "#dc2626", borderColor: "#fca5a5" }}
+                onClick={() => setConfirm({
+                  message: "Xoá nội dung này? Không thể hoàn tác.",
+                  onConfirm: async () => {
+                    setConfirm(null);
+                    await onDeleteItem(resultId);
+                    backHome();
+                  },
+                })}
+              >
+                🗑 Xoá
+              </button>
+            )}
           </div>
         )}
         {/* Video không qua editor → cho đặt tiêu đề ở đây (không bắt buộc) */}
@@ -401,33 +603,7 @@ function App() {
     );
   }
 
-  // Home
-  return (
-    <main className="container home">
-      {toast && <div className="toast">{toast}</div>}
-      {recording && (
-        <div className={"rec-banner" + (recordSeconds >= VIDEO_WARN_SECONDS ? " warn" : "")}>
-          ● Đang quay {fmtTime(recordSeconds)} — nhấn <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng
-          {recordSeconds >= VIDEO_WARN_SECONDS && " ⚠️ video đã khá dài, cân nhắc dừng"}
-        </div>
-      )}
-      <h1>Chụp & chia sẻ</h1>
-      <p>Phím tắt toàn cục:</p>
-      <p className="keys">
-        <kbd>{prettyKey(shortcuts.capture)}</kbd> chụp ảnh &nbsp;•&nbsp;
-        <kbd>{prettyKey(shortcuts.record)}</kbd> quay video
-      </p>
-      <div className="row">
-        <button className="primary" onClick={manualCapture}>
-          Chụp thử ngay
-        </button>
-        <button onClick={openLibrary}>Thư viện nội dung</button>
-        <button onClick={() => setScreen("settings")}>⚙ Cài đặt</button>
-      </div>
-      {error && <p className="error">Lỗi: {error}</p>}
-      <p className="hint">Đóng cửa sổ này app vẫn chạy nền (xem ở khay hệ thống).</p>
-    </main>
-  );
+  return null;
 }
 
 export default App;
