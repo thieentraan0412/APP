@@ -65,5 +65,5 @@ jobs:
           projectPath: desktop
           tagName: ${{ github.ref_name }}
           releaseName: "CaptureShare ${{ github.ref_name }}"
-          releaseDraft: true
+          releaseDraft: false
           includeUpdaterJson: true
