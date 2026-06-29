@@ -34,3 +34,11 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 
+# Tối ưu thời gian BUILD (app nhẹ nên không cần tối ưu runtime cao):
+# opt-level 1 + nhiều codegen-units -> compile nhanh hơn nhiều so với mặc định (opt-level 3).
+[profile.release]
+opt-level = 1
+codegen-units = 256
+lto = false
+strip = true
+
