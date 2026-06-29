@@ -4,9 +4,9 @@
 //   GET  /v/:id          trang HTML xem ảnh/video
 //   GET  /file/:id       file để xem/chia sẻ (ảnh đã gộp annotate / video)
 //   GET  /orig/:id       ảnh GỐC (phục vụ sửa lại annotate)
-//   POST /api/upload     tạo mới: file (+ original + annotations) -> R2 + D1 -> { id, url }
 //
-// Quản lý (cần header x-api-key = API_KEY):
+// Ghi / quản lý (cần header x-api-key = API_KEY):
+//   POST   /api/upload       tạo mới: file (+ original + annotations) -> R2 + D1 -> { id, url }
 //   GET    /api/items        liệt kê
 //   GET    /api/items/:id    chi tiết (kèm annotations)
 //   PATCH  /api/items/:id    sửa: thay ảnh đã gộp + annotations
@@ -17,6 +17,7 @@ export interface Env {
   DB: D1Database;
   API_KEY: string;
 }
+
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -121,6 +122,7 @@ export default {
 
     // ---------- Tạo mới ----------
     if (req.method === "POST" && path === "/api/upload") {
+      if (!authed(req, env)) return json({ error: "Không có quyền" }, 401);
       try {
         const form = await req.formData();
         const file = asFile(form.get("file"));

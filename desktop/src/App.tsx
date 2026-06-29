@@ -23,6 +23,7 @@ import {
   type UsageStats,
 } from "./lib/api";
 import type { Annotations } from "./types";
+import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
 import "./App.css";
 
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage";
@@ -119,6 +120,12 @@ function App() {
   const [warnDismissed, setWarnDismissed] = useState(false);
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
 
+  // Tự động cập nhật
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null); // null = chưa tải
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+
   // Sửa annotate
   const [editId, setEditId] = useState<string | null>(null);
   const [initialAnnotations, setInitialAnnotations] = useState<Annotations | null>(null);
@@ -186,6 +193,11 @@ function App() {
     loadUsageStats(true); // load thầm lặng để hiện badge cảnh báo ngay từ đầu
   }, []);
 
+  // Kiểm tra cập nhật khi mở app (im lặng — chỉ hiện thông báo nếu có bản mới)
+  useEffect(() => {
+    checkForUpdate().then((u) => { if (u) setUpdate(u); });
+  }, []);
+
   // ESC trên màn hình result → quay về trang chủ
   useEffect(() => {
     if (screen !== "result") return;
@@ -207,6 +219,34 @@ function App() {
   function showToast(msg: string) {
     setToast(msg);
     window.setTimeout(() => setToast(null), 2500);
+  }
+
+  // Tải & cài bản cập nhật (app sẽ tự khởi động lại khi xong)
+  async function runUpdate() {
+    if (!update) return;
+    try {
+      setUpdateProgress(0);
+      await applyUpdate(update, (pct) => setUpdateProgress(pct));
+    } catch (err) {
+      setUpdateProgress(null);
+      showToast("Cập nhật lỗi: " + String(err));
+    }
+  }
+
+  // Kiểm tra cập nhật thủ công (từ màn Cài đặt)
+  async function manualCheckUpdate() {
+    setUpdateChecking(true);
+    try {
+      const u = await checkForUpdate();
+      if (u) {
+        setUpdate(u);
+        setUpdateDismissed(false);
+      } else {
+        showToast("Bạn đang dùng bản mới nhất");
+      }
+    } finally {
+      setUpdateChecking(false);
+    }
   }
 
   function resetResult() {
@@ -407,7 +447,7 @@ function App() {
       setShortcuts(cfg);
       localStorage.setItem("shortcuts", JSON.stringify(cfg));
       showToast("Đã lưu phím tắt");
-      setScreen("home");
+      backHome();
     } catch (err) {
       showToast("Lưu phím tắt lỗi: " + String(err));
     }
@@ -434,6 +474,47 @@ function App() {
     />
   ) : null;
 
+  const UpdateOverlay = update && !updateDismissed ? (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
+    }}>
+      <div style={{
+        background: "#1c1c1e", color: "#fff", borderRadius: 14, padding: "22px 24px",
+        width: 380, maxWidth: "90vw", boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+      }}>
+        <h3 style={{ margin: "0 0 8px" }}>🔔 Có bản cập nhật mới</h3>
+        <p style={{ margin: "0 0 10px", fontSize: 14, opacity: 0.85 }}>
+          Phiên bản <b>{update.version}</b> đã sẵn sàng.
+        </p>
+        {update.body && (
+          <pre style={{
+            whiteSpace: "pre-wrap", fontSize: 12.5, background: "#000", borderRadius: 8,
+            padding: "10px 12px", maxHeight: 140, overflow: "auto", margin: "0 0 14px",
+          }}>{update.body}</pre>
+        )}
+        {updateProgress === null ? (
+          <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+            <button onClick={() => setUpdateDismissed(true)}>Để sau</button>
+            <button className="primary" onClick={runUpdate}>Cập nhật ngay</button>
+          </div>
+        ) : (
+          <div>
+            <div style={{ height: 8, background: "#333", borderRadius: 4, overflow: "hidden" }}>
+              <div style={{
+                width: `${Math.round(updateProgress * 100)}%`, height: "100%",
+                background: "#3b82f6", transition: "width 0.2s",
+              }}/>
+            </div>
+            <p style={{ margin: "8px 0 0", fontSize: 13, opacity: 0.8 }}>
+              Đang tải bản cập nhật… {Math.round(updateProgress * 100)}%
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   if (screen === "editor" && image) {
     return (
       <>
@@ -446,6 +527,7 @@ function App() {
         />
         {RecPopupOverlay}
         {ConfirmOverlay}
+        {UpdateOverlay}
       </>
     );
   }
@@ -458,6 +540,7 @@ function App() {
         {toast && <div className="toast">{toast}</div>}
         {RecPopupOverlay}
         {ConfirmOverlay}
+        {UpdateOverlay}
         <GlobalSidebar
           screen={screen}
           onHome={backHome}
@@ -522,6 +605,8 @@ function App() {
               record={shortcuts.record}
               onSave={onSaveShortcuts}
               onBack={backHome}
+              onCheckUpdate={manualCheckUpdate}
+              updateChecking={updateChecking}
             />
           )}
         </div>
@@ -535,6 +620,7 @@ function App() {
         {toast && <div className="toast">{toast}</div>}
         {RecPopupOverlay}
         {ConfirmOverlay}
+        {UpdateOverlay}
         <div className="topbar">
           <span className="badge">
             {uploading ? "Đang tải lên…" : uploadError ? "Lỗi" : "Đã lưu ✓"}

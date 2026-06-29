@@ -9,6 +9,8 @@
     "opener:allow-open-url",
     "global-shortcut:default",
     "clipboard-manager:allow-write-text",
+    "updater:default",
+    "process:allow-restart",
     {
       "identifier": "shell:allow-spawn",
       "allow": [{ "name": "binaries/ffmpeg", "sidecar": true, "args": true }]

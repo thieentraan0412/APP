@@ -1,10 +1,17 @@
 // Gọi API Worker để upload, lấy link, và quản lý nội dung.
 import type { Annotations } from "../types";
 
-const WORKER_URL = "https://captures-api.thieentraan.workers.dev";
-// Khoá cho các thao tác quản lý (liệt kê/sửa/xoá).
-// Lưu ý: nhúng trong app desktop nên không thật sự bí mật — chỉ chặn lạm dụng thông thường.
-const API_KEY = "cap_2026_f4a9d3b7e1c85206ab";
+// Đọc cấu hình từ .env (xem desktop/.env.example). Vite chỉ expose biến VITE_*.
+// Lưu ý: API key vẫn nằm trong bản build app desktop nên không thật sự bí mật —
+// chỉ chặn lạm dụng thông thường.
+const WORKER_URL = import.meta.env.VITE_WORKER_URL;
+const API_KEY = import.meta.env.VITE_API_KEY;
+
+if (!WORKER_URL || !API_KEY) {
+  console.error(
+    "Thiếu cấu hình: hãy tạo desktop/.env với VITE_WORKER_URL và VITE_API_KEY (xem .env.example)."
+  );
+}
 
 export interface UploadResult {
   id: string;
@@ -77,7 +84,11 @@ export async function uploadVideo(blob: Blob): Promise<UploadResult> {
 }
 
 async function postUpload(form: FormData): Promise<UploadResult> {
-  const res = await fetchRetry(`${WORKER_URL}/api/upload`, { method: "POST", body: form });
+  const res = await fetchRetry(`${WORKER_URL}/api/upload`, {
+    method: "POST",
+    headers: authHeader,
+    body: form,
+  });
   if (!res.ok) throw new Error(`Tải lên thất bại (HTTP ${res.status})`);
   return res.json();
 }

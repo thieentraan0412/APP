@@ -17,8 +17,12 @@ desktop/src-tauri/binaries/
 # ===== Secrets / env =====
 .env
 .env.*
+!.env.example
 .dev.vars
 *.local
+
+# ===== Khóa ký auto-update (TUYỆT ĐỐI không commit private key) =====
+*.key
 
 # ===== Wrangler (Cloudflare) =====
 .wrangler/

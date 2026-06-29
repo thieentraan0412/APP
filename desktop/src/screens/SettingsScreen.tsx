@@ -5,6 +5,8 @@ interface Props {
   record: string;
   onSave: (capture: string, record: string) => void;
   onBack: () => void;
+  onCheckUpdate: () => void;
+  updateChecking: boolean;
 }
 
 // Lấy tên phím từ event (dùng e.code để không lệ thuộc Shift, vd Shift+1)
@@ -69,7 +71,7 @@ function ShortcutCapture({
   );
 }
 
-export function SettingsScreen({ capture, record, onSave, onBack }: Props) {
+export function SettingsScreen({ capture, record, onSave, onBack, onCheckUpdate, updateChecking }: Props) {
   const [cap, setCap] = useState(capture);
   const [rec, setRec] = useState(record);
 
@@ -98,6 +100,14 @@ export function SettingsScreen({ capture, record, onSave, onBack }: Props) {
             }}
           >
             Khôi phục mặc định
+          </button>
+        </div>
+
+        <h3 style={{ marginTop: 28 }}>Cập nhật ứng dụng</h3>
+        <p className="hint">Kiểm tra và cài phiên bản mới nhất.</p>
+        <div className="row" style={{ justifyContent: "flex-start" }}>
+          <button onClick={onCheckUpdate} disabled={updateChecking}>
+            {updateChecking ? "Đang kiểm tra…" : "Kiểm tra cập nhật"}
           </button>
         </div>
       </div>

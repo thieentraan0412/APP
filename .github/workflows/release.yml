@@ -1,0 +1,56 @@
+name: release
+
+# Kích hoạt khi push tag dạng v* (vd v0.2.0)
+on:
+  push:
+    tags: ["v*"]
+
+# tauri-action cần quyền ghi để tạo GitHub Release
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cài dependencies (frontend)
+        working-directory: desktop
+        run: npm install
+
+      # G2: ffmpeg bị .gitignore (vượt 100MB) nên KHÔNG có trên repo.
+      # Phải tải về đúng đường dẫn + đúng tên target-triple trước khi build,
+      # nếu không bộ cài sẽ thiếu ffmpeg (externalBin) -> app không quay được video.
+      # Có thể thay URL bằng release riêng của bạn chứa đúng file ffmpeg.exe.
+      - name: Tải ffmpeg vào binaries/
+        shell: pwsh
+        run: |
+          $dest = "desktop/src-tauri/binaries"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $zip = "$env:RUNNER_TEMP/ffmpeg.zip"
+          curl -L -o $zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP/ffmpeg" -Force
+          $exe = Get-ChildItem -Path "$env:RUNNER_TEMP/ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $exe.FullName "$dest/ffmpeg-x86_64-pc-windows-msvc.exe" -Force
+          Write-Output "Đã đặt ffmpeg vào $dest"
+
+      # G3 + G4: build + ký + tạo Release (draft) + sinh latest.json cho updater
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # Khóa không đặt mật khẩu -> để rỗng
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "CaptureShare ${{ github.ref_name }}"
+          releaseDraft: true
+          includeUpdaterJson: true
