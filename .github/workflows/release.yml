@@ -21,6 +21,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Cache crate Rust đã compile -> bản sau build nhanh hơn nhiều (chỉ build phần đổi)
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
       - name: Cài dependencies (frontend)
         working-directory: desktop
         run: npm install
