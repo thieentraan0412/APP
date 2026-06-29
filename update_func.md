@@ -47,10 +47,13 @@
 - [x] G5. (phụ) Đã dọn 5 icon thừa ở `LibraryScreen.tsx` để `tsc` build production qua được
 
 ### H. Phát hành & kiểm thử
-- [ ] H1. Tăng version khớp ở 3 file: `tauri.conf.json`, `Cargo.toml`, `package.json`
-- [ ] H2. `git tag v0.2.0 && git push origin v0.2.0`
-- [ ] H3. Chờ CI build xong → vào GitHub Releases → **Publish** (bỏ draft)
-- [ ] H4. Cài bản cũ → mở app → thấy thông báo update → cập nhật → app restart sang bản mới ✅
+- [x] H0. Commit + push toàn bộ lên `main`
+- [x] H0b. (bảo mật) Đổi API_KEY mới vì key cũ lộ trong git history khi public — Worker + .env đã đồng bộ, key cũ đã 401
+- [x] H1. Phát hành baseline: tag `v0.1.0` đã push → CI chạy
+- [ ] H2. **Đổi repo sang Public** (Settings → Danger Zone) — *thao tác của bạn, để updater tải được*
+- [ ] H3. Kiểm tra CI build v0.1.0 xong ở tab Actions → vào Releases → **Publish** (bỏ draft) → cài máy
+- [ ] H4. Phát hành bản mới để TEST update: tăng version 3 file → tag `v0.2.0` → publish
+- [ ] H5. Mở app v0.1.0 đã cài → thấy thông báo update → cập nhật → app restart sang v0.2.0 ✅
 
 ---
 

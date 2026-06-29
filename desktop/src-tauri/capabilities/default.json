@@ -12,10 +12,6 @@
     "updater:default",
     "process:allow-restart",
     {
-      "identifier": "shell:allow-spawn",
-      "allow": [{ "name": "binaries/ffmpeg", "sidecar": true, "args": true }]
-    },
-    {
       "identifier": "fs:allow-read-file",
       "allow": [{ "path": "$TEMP/**" }]
     }

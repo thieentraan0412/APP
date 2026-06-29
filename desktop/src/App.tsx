@@ -177,6 +177,8 @@ function App() {
         setUploading(false);
         setUploadError(e.payload);
       }),
+      listen("ffmpeg-downloading", () => showToast("Đang tải thành phần quay video (chỉ lần đầu)…")),
+      listen("ffmpeg-ready", () => showToast("Đã sẵn sàng quay video")),
     ];
     return () => subs.forEach((p) => p.then((f) => f()));
   }, []);

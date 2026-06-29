@@ -30,31 +30,6 @@ jobs:
         working-directory: desktop
         run: npm install
 
-      # Cache ffmpeg để không phải tải lại 319MB mỗi lần build
-      - name: Cache ffmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@v4
-        with:
-          path: desktop/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe
-          key: ffmpeg-btbn-win64-v1
-
-      # G2: ffmpeg bị .gitignore (vượt 100MB) nên KHÔNG có trên repo.
-      # Phải tải về đúng đường dẫn + đúng tên target-triple trước khi build,
-      # nếu không bộ cài sẽ thiếu ffmpeg (externalBin) -> app không quay được video.
-      # Có thể thay URL bằng release riêng của bạn chứa đúng file ffmpeg.exe.
-      - name: Tải ffmpeg vào binaries/
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $dest = "desktop/src-tauri/binaries"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          $zip = "$env:RUNNER_TEMP/ffmpeg.zip"
-          curl -L -o $zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP/ffmpeg" -Force
-          $exe = Get-ChildItem -Path "$env:RUNNER_TEMP/ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          Copy-Item $exe.FullName "$dest/ffmpeg-x86_64-pc-windows-msvc.exe" -Force
-          Write-Output "Đã đặt ffmpeg vào $dest"
-
       # .env bị gitignore nên CI không có -> tự tạo để Vite inline lúc build.
       # VITE_API_KEY lấy từ GitHub Secret (không để lộ trong repo).
       - name: Tạo .env cho frontend

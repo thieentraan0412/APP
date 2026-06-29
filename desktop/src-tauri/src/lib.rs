@@ -1,4 +1,5 @@
 mod capture;
+mod ffmpeg;
 mod record;
 
 use std::str::FromStr;
