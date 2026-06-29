@@ -46,6 +46,14 @@ jobs:
           Copy-Item $exe.FullName "$dest/ffmpeg-x86_64-pc-windows-msvc.exe" -Force
           Write-Output "Đã đặt ffmpeg vào $dest"
 
+      # .env bị gitignore nên CI không có -> tự tạo để Vite inline lúc build.
+      # VITE_API_KEY lấy từ GitHub Secret (không để lộ trong repo).
+      - name: Tạo .env cho frontend
+        shell: bash
+        run: |
+          echo "VITE_WORKER_URL=https://captures-api.thieentraan.workers.dev" > desktop/.env
+          echo "VITE_API_KEY=${{ secrets.VITE_API_KEY }}" >> desktop/.env
+
       # G3 + G4: build + ký + tạo Release (draft) + sinh latest.json cho updater
       - uses: tauri-apps/tauri-action@v0
         env:
