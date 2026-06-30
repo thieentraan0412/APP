@@ -11,17 +11,17 @@ use tauri::{
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-// Lưu phím tắt hiện tại để handler so khớp (cho phép đổi trong Cài đặt).
 #[derive(Default)]
 struct ShortcutCfg {
     capture: Mutex<Option<Shortcut>>,
-    record: Mutex<Option<Shortcut>>,
+    record:  Mutex<Option<Shortcut>>,
+    region:  Mutex<Option<Shortcut>>,
 }
 
 const DEFAULT_CAPTURE: &str = "CommandOrControl+Shift+1";
-const DEFAULT_RECORD: &str = "CommandOrControl+Shift+2";
+const DEFAULT_RECORD:  &str = "CommandOrControl+Shift+2";
+const DEFAULT_REGION:  &str = "CommandOrControl+Shift+3";
 
-// Chụp màn hình rồi gửi ảnh (data URL) sang giao diện + hiện cửa sổ editor.
 fn trigger_capture(app: &AppHandle) {
     match capture::capture_primary_png_base64() {
         Ok(data_url) => {
@@ -38,26 +38,33 @@ fn trigger_capture(app: &AppHandle) {
     }
 }
 
-// Đăng ký lại 2 phím tắt (dùng cho khởi động và khi đổi trong Cài đặt).
-fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str) -> Result<(), String> {
+fn trigger_region_capture(app: &AppHandle) {
+    capture::begin_region_capture(app.clone());
+}
+
+fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str) -> Result<(), String> {
     let cap = Shortcut::from_str(capture).map_err(|e| e.to_string())?;
     let rec = Shortcut::from_str(record).map_err(|e| e.to_string())?;
+    let reg = Shortcut::from_str(region).map_err(|e| e.to_string())?;
+
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
     gs.register(cap.clone()).map_err(|e| e.to_string())?;
     gs.register(rec.clone()).map_err(|e| e.to_string())?;
+    gs.register(reg.clone()).map_err(|e| e.to_string())?;
+
     let st = app.state::<ShortcutCfg>();
     *st.capture.lock().unwrap() = Some(cap);
-    *st.record.lock().unwrap() = Some(rec);
+    *st.record.lock().unwrap()  = Some(rec);
+    *st.region.lock().unwrap()  = Some(reg);
     Ok(())
 }
 
 #[tauri::command]
-fn set_shortcuts(app: AppHandle, capture: String, record: String) -> Result<(), String> {
-    apply_shortcuts(&app, &capture, &record)
+fn set_shortcuts(app: AppHandle, capture: String, record: String, region: String) -> Result<(), String> {
+    apply_shortcuts(&app, &capture, &record, &region)
 }
 
-// Xoá file tạm (vd video sau khi upload xong).
 #[tauri::command]
 fn remove_temp(path: String) {
     let _ = std::fs::remove_file(path);
@@ -79,6 +86,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(record::RecState::default())
         .manage(ShortcutCfg::default())
+        .manage(capture::RegionState::default())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -86,36 +94,28 @@ pub fn run() {
                         return;
                     }
                     let st = app.state::<ShortcutCfg>();
-                    let is_cap = st
-                        .capture
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .map_or(false, |s| s == shortcut);
-                    let is_rec = st
-                        .record
-                        .lock()
-                        .unwrap()
-                        .as_ref()
-                        .map_or(false, |s| s == shortcut);
+                    let is_cap = st.capture.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
+                    let is_rec = st.record.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
+                    let is_reg = st.region.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
                     if is_cap {
                         trigger_capture(app);
                     } else if is_rec {
                         record::toggle_recording(app);
+                    } else if is_reg {
+                        trigger_region_capture(app);
                     }
                 })
                 .build(),
         )
         .setup(|app| {
-            // Đăng ký phím tắt mặc định khi khởi động.
-            let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD);
+            let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION);
 
-            // System tray: menu Chụp / Quay / Mở / Thoát.
             let capture_i = MenuItem::with_id(app, "capture", "Chụp màn hình", true, None::<&str>)?;
-            let record_i = MenuItem::with_id(app, "record", "Quay / Dừng video", true, None::<&str>)?;
-            let show_i = MenuItem::with_id(app, "show", "Mở cửa sổ", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Thoát", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&capture_i, &record_i, &show_i, &quit_i])?;
+            let region_i  = MenuItem::with_id(app, "region",  "Chụp vùng",     true, None::<&str>)?;
+            let record_i  = MenuItem::with_id(app, "record",  "Quay / Dừng video", true, None::<&str>)?;
+            let show_i    = MenuItem::with_id(app, "show",    "Mở cửa sổ",     true, None::<&str>)?;
+            let quit_i    = MenuItem::with_id(app, "quit",    "Thoát",          true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&capture_i, &region_i, &record_i, &show_i, &quit_i])?;
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -123,7 +123,8 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "capture" => trigger_capture(app),
-                    "record" => record::toggle_recording(app),
+                    "region"  => trigger_region_capture(app),
+                    "record"  => record::toggle_recording(app),
                     "show" => {
                         if let Some(win) = app.get_webview_window("main") {
                             let _ = win.show();
@@ -137,7 +138,6 @@ pub fn run() {
 
             Ok(())
         })
-        // Đóng cửa sổ → ẩn xuống tray thay vì thoát app (để phím tắt vẫn chạy nền).
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
@@ -146,6 +146,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             capture::capture_screen,
+            capture::start_region_capture,
+            capture::confirm_region_capture,
+            capture::cancel_region_capture,
             set_shortcuts,
             remove_temp,
             toggle_recording_cmd

@@ -4,6 +4,13 @@ import { AnnotateCanvas } from "../components/AnnotateCanvas";
 import { Toolbar } from "../components/Toolbar";
 import { flattenStage, dataUrlToBlob } from "../lib/flatten";
 import type { Annotations, Arrow, Box, Note, StepMarker, Tool } from "../types";
+import { nanoid } from "nanoid";
+
+type ClipItem =
+  | { kind: "box"; data: Box }
+  | { kind: "arrow"; data: Arrow }
+  | { kind: "step"; data: StepMarker }
+  | { kind: "note"; data: Note };
 
 const COLOR = "#ff2d2d"; // màu khung + note (đỏ)
 const TOOLBAR_H = 56;
@@ -26,10 +33,12 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const [notes, setNotes] = useState<Note[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [copyMsg, setCopyMsg] = useState<string | null>(null);
   const [title, setTitle] = useState(initialTitle ?? "");
   const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
   const stageRef = useRef<Konva.Stage>(null);
   const appliedInit = useRef(false);
+  const clipboard = useRef<ClipItem | null>(null);
 
   // Tải ảnh từ data URL
   useEffect(() => {
@@ -48,9 +57,48 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // Phím tắt trong editor
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onBack();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
         e.preventDefault();
         handleSave();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "c" && !selectedId) {
+        e.preventDefault();
+        copyImage();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "c" && selectedId) {
+        e.preventDefault();
+        const box = boxes.find((b) => b.id === selectedId);
+        if (box) { clipboard.current = { kind: "box", data: box }; return; }
+        const arrow = arrows.find((a) => a.id === selectedId);
+        if (arrow) { clipboard.current = { kind: "arrow", data: arrow }; return; }
+        const step = steps.find((s) => s.id === selectedId);
+        if (step) { clipboard.current = { kind: "step", data: step }; return; }
+        const note = notes.find((n) => n.id === selectedId);
+        if (note) { clipboard.current = { kind: "note", data: note }; return; }
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === "v") {
+        e.preventDefault();
+        e.stopPropagation();
+        const clip = clipboard.current;
+        if (!clip) return;
+        const D = 15;
+        const newId = nanoid();
+        if (clip.kind === "box") {
+          setBoxes((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
+        } else if (clip.kind === "arrow") {
+          setArrows((prev) => [...prev, { ...clip.data, id: newId, x1: clip.data.x1 + D, y1: clip.data.y1 + D, x2: clip.data.x2 + D, y2: clip.data.y2 + D }]);
+        } else if (clip.kind === "step") {
+          setSteps((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
+        } else if (clip.kind === "note") {
+          setNotes((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
+        }
+        setSelectedId(newId);
         return;
       }
       if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
@@ -92,6 +140,25 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setSelectedId(null);
   }
 
+  async function copyImage() {
+    if (!stageRef.current || !img) return;
+    const prevSelected = selectedId;
+    setSelectedId(null);
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    try {
+      const pixelRatio = 1 / fit.scale;
+      const dataUrl = stageRef.current.toDataURL({ mimeType: "image/png", pixelRatio });
+      const blob = dataUrlToBlob(dataUrl);
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      setCopyMsg("Đã copy ảnh ✓");
+    } catch {
+      setCopyMsg("Copy thất bại");
+    } finally {
+      setSelectedId(prevSelected);
+      window.setTimeout(() => setCopyMsg(null), 1800);
+    }
+  }
+
   async function handleSave() {
     if (!stageRef.current || !img) return;
     setSaving(true);
@@ -122,6 +189,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
 
   return (
     <div className="editor">
+      {copyMsg && <div className="toast">{copyMsg}</div>}
       <Toolbar
         tool={tool}
         setTool={setTool}

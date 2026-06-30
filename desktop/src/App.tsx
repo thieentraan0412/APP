@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { writeText, readImage } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { EditorScreen } from "./screens/EditorScreen";
@@ -28,7 +28,7 @@ import "./App.css";
 
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage";
 
-const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2" };
+const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3" };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
 
 const SidebarS = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -56,8 +56,8 @@ function checkUsageWarnings(stats: UsageStats): string[] {
   return warns;
 }
 
-function GlobalSidebar({ screen, onHome, onCapture, onRecord, onUsage, onSettings, recording, usageWarnings }: {
-  screen: Screen; onHome: () => void; onCapture: () => void; onRecord: () => void;
+function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onRecord, onUsage, onSettings, recording, usageWarnings }: {
+  screen: Screen; onHome: () => void; onCapture: () => void; onRegionCapture: () => void; onRecord: () => void;
   onUsage: () => void; onSettings: () => void; recording: boolean; usageWarnings: string[];
 }) {
   const hasWarn = usageWarnings.length > 0;
@@ -68,6 +68,9 @@ function GlobalSidebar({ screen, onHome, onCapture, onRecord, onUsage, onSetting
       </button>
       <button className="lib-tool" onClick={onCapture} title="Chụp ảnh">
         <svg {...SidebarS}><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3Z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      </button>
+      <button className="lib-tool" onClick={onRegionCapture} title="Chụp vùng màn hình (Ctrl+Shift+3)">
+        <svg {...SidebarS}><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
       </button>
       <button className={`lib-tool${recording ? " lib-tool--recording" : ""}`} onClick={onRecord} title="Quay / dừng video">
         <svg {...SidebarS}><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>
@@ -149,7 +152,51 @@ function App() {
   const [libLoading, setLibLoading] = useState(false);
   const [libError, setLibError] = useState<string | null>(null);
 
+  const screenRef = useRef<Screen>("library");
+  useEffect(() => { screenRef.current = screen; }, [screen]);
+
   useEffect(() => {
+    async function handlePaste(e: ClipboardEvent) {
+      if (screenRef.current === "editor") return;
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (!file) continue;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result as string;
+            setError(null);
+            setEditId(null);
+            setInitialAnnotations(null);
+            setEditTitle("");
+            setImage(dataUrl);
+            setScreen("editor");
+          };
+          reader.readAsDataURL(file);
+          return;
+        }
+      }
+      // Fallback: đọc ảnh từ clipboard qua Tauri plugin (dán từ app khác)
+      try {
+        const img = await readImage();
+        const [rgba, size] = await Promise.all([img.rgba(), img.size()]);
+        const canvas = document.createElement("canvas");
+        canvas.width = size.width;
+        canvas.height = size.height;
+        canvas.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(rgba), size.width, size.height), 0, 0);
+        const dataUrl = canvas.toDataURL("image/png");
+        setError(null);
+        setEditId(null);
+        setInitialAnnotations(null);
+        setEditTitle("");
+        setImage(dataUrl);
+        setScreen("editor");
+      } catch {}
+    }
+    window.addEventListener("paste", handlePaste);
+
     const subs = [
       listen<string>("image-captured", (e) => {
         setError(null);
@@ -180,16 +227,19 @@ function App() {
       listen("ffmpeg-downloading", () => showToast("Đang tải thành phần quay video (chỉ lần đầu)…")),
       listen("ffmpeg-ready", () => showToast("Đã sẵn sàng quay video")),
     ];
-    return () => subs.forEach((p) => p.then((f) => f()));
+    return () => {
+      window.removeEventListener("paste", handlePaste);
+      subs.forEach((p) => p.then((f) => f()));
+    };
   }, []);
 
   // Tải phím tắt đã lưu và áp dụng khi mở app + load thư viện ngay
   useEffect(() => {
     try {
       const saved = localStorage.getItem("shortcuts");
-      const cfg = saved ? JSON.parse(saved) : DEFAULT_SHORTCUTS;
+      const cfg = { ...DEFAULT_SHORTCUTS, ...(saved ? JSON.parse(saved) : {}) };
       setShortcuts(cfg);
-      invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record }).catch(() => {});
+      invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region }).catch(() => {});
     } catch {}
     openLibrary();
     loadUsageStats(true); // load thầm lặng để hiện badge cảnh báo ngay từ đầu
@@ -259,6 +309,10 @@ function App() {
     setResultId(null);
     setVideoTitle("");
     setTitleSaved(false);
+  }
+
+  function manualRegionCapture() {
+    invoke("start_region_capture").catch(() => {});
   }
 
   async function manualCapture() {
@@ -442,10 +496,10 @@ function App() {
     }
   }
 
-  async function onSaveShortcuts(capture: string, record: string) {
+  async function onSaveShortcuts(capture: string, record: string, region: string) {
     try {
-      await invoke("set_shortcuts", { capture, record });
-      const cfg = { capture, record };
+      await invoke("set_shortcuts", { capture, record, region });
+      const cfg = { capture, record, region };
       setShortcuts(cfg);
       localStorage.setItem("shortcuts", JSON.stringify(cfg));
       showToast("Đã lưu phím tắt");
@@ -547,6 +601,7 @@ function App() {
           screen={screen}
           onHome={backHome}
           onCapture={manualCapture}
+          onRegionCapture={manualRegionCapture}
           onRecord={toggleRecord}
           onUsage={openUsage}
           onSettings={() => setScreen("settings")}
@@ -605,6 +660,7 @@ function App() {
             <SettingsScreen
               capture={shortcuts.capture}
               record={shortcuts.record}
+              region={shortcuts.region}
               onSave={onSaveShortcuts}
               onBack={backHome}
               onCheckUpdate={manualCheckUpdate}

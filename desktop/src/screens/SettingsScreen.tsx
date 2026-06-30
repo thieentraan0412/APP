@@ -3,7 +3,8 @@ import { useState } from "react";
 interface Props {
   capture: string;
   record: string;
-  onSave: (capture: string, record: string) => void;
+  region: string;
+  onSave: (capture: string, record: string, region: string) => void;
   onBack: () => void;
   onCheckUpdate: () => void;
   updateChecking: boolean;
@@ -71,9 +72,10 @@ function ShortcutCapture({
   );
 }
 
-export function SettingsScreen({ capture, record, onSave, onBack, onCheckUpdate, updateChecking }: Props) {
+export function SettingsScreen({ capture, record, region, onSave, onBack, onCheckUpdate, updateChecking }: Props) {
   const [cap, setCap] = useState(capture);
   const [rec, setRec] = useState(record);
+  const [reg, setReg] = useState(region);
 
   return (
     <main className="container">
@@ -85,17 +87,19 @@ export function SettingsScreen({ capture, record, onSave, onBack, onCheckUpdate,
       <div className="settings">
         <h3>Phím tắt toàn cục</h3>
         <ShortcutCapture label="Chụp ảnh" value={cap} onChange={setCap} />
+        <ShortcutCapture label="Chụp vùng màn hình" value={reg} onChange={setReg} />
         <ShortcutCapture label="Quay / dừng video" value={rec} onChange={setRec} />
         <p className="hint">
           Bấm vào ô bên phải rồi nhấn tổ hợp phím mới (cần ít nhất một phím Ctrl / Shift / Alt).
         </p>
         <div className="row" style={{ justifyContent: "flex-start" }}>
-          <button className="primary" onClick={() => onSave(cap, rec)}>
+          <button className="primary" onClick={() => onSave(cap, rec, reg)}>
             Lưu phím tắt
           </button>
           <button
             onClick={() => {
               setCap("Control+Shift+1");
+              setReg("Control+Shift+3");
               setRec("Control+Shift+2");
             }}
           >

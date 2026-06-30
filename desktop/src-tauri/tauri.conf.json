@@ -12,9 +12,22 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Chụp & Chia sẻ",
         "width": 980,
         "height": 680
+      },
+      {
+        "label": "region_selector",
+        "title": "",
+        "url": "/",
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "fullscreen": true,
+        "skipTaskbar": true,
+        "resizable": false
       }
     ],
     "security": {
