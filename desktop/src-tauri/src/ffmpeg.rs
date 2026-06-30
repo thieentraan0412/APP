@@ -1,5 +1,6 @@
 // Tải ffmpeg về app_data lần đầu (KHÔNG bundle vào bộ cài để cài nhẹ + build nhanh).
 use std::fs;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -21,16 +22,36 @@ pub fn ensure_ffmpeg(app: &AppHandle) -> Result<PathBuf, String> {
         }
     }
 
-    // Tải về (stream ra file để không ngốn RAM)
+    // Tải về (stream ra file để không ngốn RAM) + phát tiến độ %.
     let _ = app.emit("ffmpeg-downloading", ());
     let mut resp = reqwest::blocking::get(FFMPEG_URL).map_err(|e| format!("Tải ffmpeg lỗi: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("Tải ffmpeg lỗi HTTP {}", resp.status()));
     }
+    let total = resp.content_length(); // Option<u64>: None nếu server không báo dung lượng
     let tmp = dir.join("ffmpeg.exe.part");
     {
         let mut file = fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        std::io::copy(&mut resp, &mut file).map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut downloaded: u64 = 0;
+        let mut last_pct: i64 = -1;
+        loop {
+            let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            downloaded += n as u64;
+            // Có dung lượng tổng → phát % (0..100); không có → phát -1 (không xác định)
+            let pct = match total {
+                Some(t) if t > 0 => ((downloaded as f64 / t as f64) * 100.0) as i64,
+                _ => -1,
+            };
+            if pct != last_pct {
+                last_pct = pct;
+                let _ = app.emit("ffmpeg-progress", pct);
+            }
+        }
     }
     // Kiểm tra kích thước trước khi dùng
     let ok = fs::metadata(&tmp).map(|m| m.len() > MIN_SIZE).unwrap_or(false);

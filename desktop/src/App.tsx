@@ -108,6 +108,20 @@ function fmtTime(sec: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+// ── Cache-bust ảnh đã sửa ──────────────────────────────────
+// Worker ghi đè ảnh lên cùng URL (/file/:id) và đặt cache 1 năm, nên sau khi sửa
+// thumbnail vẫn hiện ảnh cũ trong cache. Ta lưu "phiên bản" mỗi ảnh đã sửa vào
+// localStorage và gắn ?cb=<phiên bản> vào URL để buộc tải lại đúng ảnh mới.
+// (Chỉ ảnh từng sửa mới tải lại; ảnh khác vẫn dùng cache → không tốn thêm ops.)
+const IMG_VER_KEY = "img-versions";
+function loadImgVersions(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(IMG_VER_KEY) || "{}"); } catch { return {}; }
+}
+function busted(url: string, v?: number): string {
+  if (!v) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}cb=${v}`;
+}
+
 function App() {
   const [screen, setScreen] = useState<Screen>("library");
   const [image, setImage] = useState<string | null>(null);
@@ -115,8 +129,9 @@ function App() {
   const [recording, setRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
+  const [ffmpegDl, setFfmpegDl] = useState<number | null>(null); // null=không tải, -1=không rõ %, 0..100=phần trăm
   const [recPopup, setRecPopup] = useState<"start" | "stop" | null>(null);
-  const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void; onCancel?: () => void } | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageWarnings, setUsageWarnings] = useState<string[]>([]);
@@ -151,6 +166,7 @@ function App() {
   const [libItems, setLibItems] = useState<LibraryItem[]>([]);
   const [libLoading, setLibLoading] = useState(false);
   const [libError, setLibError] = useState<string | null>(null);
+  const [imgVersions, setImgVersions] = useState<Record<string, number>>(loadImgVersions);
 
   const screenRef = useRef<Screen>("library");
   useEffect(() => { screenRef.current = screen; }, [screen]);
@@ -220,12 +236,15 @@ function App() {
       listen<string>("video-ready", (e) => handleVideoReady(e.payload)),
       listen<string>("video-error", (e) => {
         setRecording(false);
+        setFfmpegDl(null);
         setScreen("result");
         setUploading(false);
         setUploadError(e.payload);
       }),
-      listen("ffmpeg-downloading", () => showToast("Đang tải thành phần quay video (chỉ lần đầu)…")),
-      listen("ffmpeg-ready", () => showToast("Đã sẵn sàng quay video")),
+      listen("ffmpeg-downloading", () => setFfmpegDl(0)),
+      listen<number>("ffmpeg-progress", (e) => setFfmpegDl(e.payload)),
+      listen("ffmpeg-ready", () => { setFfmpegDl(null); showToast("Đã sẵn sàng quay video"); }),
+      listen("ffmpeg-preparing", () => showToast("Đang chuẩn bị bộ quay (đợi hệ thống quét xong)…")),
     ];
     return () => {
       window.removeEventListener("paste", handlePaste);
@@ -272,6 +291,30 @@ function App() {
     setToast(msg);
     window.setTimeout(() => setToast(null), 2500);
   }
+
+  // Đánh dấu ảnh vừa sửa với phiên bản mới (timestamp) → ép tải lại ảnh mới, kể cả sau khi mở lại app
+  function bumpImgVersion(id: string) {
+    setImgVersions((prev) => {
+      const next = { ...prev, [id]: Date.now() };
+      try { localStorage.setItem(IMG_VER_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }
+  function pruneImgVersion(id: string) {
+    setImgVersions((prev) => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      try { localStorage.setItem(IMG_VER_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }
+  // Gắn ?cb cho ảnh từng sửa để hiện đúng ảnh mới (video không cần)
+  const displayItems = libItems.map((it) =>
+    it.type === "image" && imgVersions[it.id]
+      ? { ...it, fileUrl: busted(it.fileUrl, imgVersions[it.id]) }
+      : it
+  );
 
   // Tải & cài bản cập nhật (app sẽ tự khởi động lại khi xong)
   async function runUpdate() {
@@ -339,6 +382,7 @@ function App() {
     if (editId) {
       try {
         await updateItem(editId, flattened, annotations, title);
+        bumpImgVersion(editId); // ép thumbnail tải lại ảnh mới (qua cache)
         showToast("Đã cập nhật");
         setEditId(null);
         setInitialAnnotations(null);
@@ -458,11 +502,42 @@ function App() {
           try {
             await deleteItem(id);
             setLibItems((prev) => prev.filter((x) => x.id !== id));
+            pruneImgVersion(id);
             showToast("Đã xoá");
           } catch (err) {
             showToast("Xoá lỗi: " + String(err));
           }
           resolve();
+        },
+      });
+    });
+  }
+
+  // Xoá nhiều mục cùng lúc. Trả về true nếu đã xoá (xác nhận), false nếu huỷ.
+  async function onBulkDelete(ids: string[]): Promise<boolean> {
+    if (ids.length === 0) return false;
+    return new Promise<boolean>((resolve) => {
+      setConfirm({
+        message: `Xoá ${ids.length} nội dung đã chọn? Không thể hoàn tác.`,
+        onCancel: () => resolve(false),
+        onConfirm: async () => {
+          setConfirm(null);
+          const results = await Promise.allSettled(ids.map((id) => deleteItem(id)));
+          const okIds = ids.filter((_, i) => results[i].status === "fulfilled");
+          const failed = ids.length - okIds.length;
+          if (okIds.length) {
+            const okSet = new Set(okIds);
+            setLibItems((prev) => prev.filter((x) => !okSet.has(x.id)));
+            setImgVersions((prev) => {
+              let changed = false;
+              const next = { ...prev };
+              for (const id of okIds) if (id in next) { delete next[id]; changed = true; }
+              if (changed) { try { localStorage.setItem(IMG_VER_KEY, JSON.stringify(next)); } catch {} }
+              return changed ? next : prev;
+            });
+          }
+          showToast(failed > 0 ? `Đã xoá ${okIds.length}, lỗi ${failed}` : `Đã xoá ${okIds.length} mục`);
+          resolve(true);
         },
       });
     });
@@ -522,11 +597,27 @@ function App() {
     </div>
   ) : null;
 
+  // Thanh tiến độ tải bộ quay video (ffmpeg) — chỉ hiện khi đang tải lần đầu.
+  const DownloadOverlay = ffmpegDl !== null ? (
+    <div className="dl-banner">
+      <div className="dl-banner-head">
+        <span>⬇️ Đang tải bộ quay video (chỉ lần đầu)</span>
+        <span className="dl-banner-pct">{ffmpegDl >= 0 ? `${ffmpegDl}%` : "…"}</span>
+      </div>
+      <div className="dl-bar">
+        <div
+          className={`dl-bar-fill${ffmpegDl < 0 ? " dl-bar-fill--indeterminate" : ""}`}
+          style={ffmpegDl >= 0 ? { width: `${ffmpegDl}%` } : undefined}
+        />
+      </div>
+    </div>
+  ) : null;
+
   const ConfirmOverlay = confirm ? (
     <ConfirmModal
       message={confirm.message}
       onConfirm={confirm.onConfirm}
-      onCancel={() => setConfirm(null)}
+      onCancel={() => { confirm.onCancel?.(); setConfirm(null); }}
     />
   ) : null;
 
@@ -582,6 +673,7 @@ function App() {
           onSaved={handleSaved}
         />
         {RecPopupOverlay}
+        {DownloadOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
       </>
@@ -595,6 +687,7 @@ function App() {
       <div className="lib-layout">
         {toast && <div className="toast">{toast}</div>}
         {RecPopupOverlay}
+        {DownloadOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
         <GlobalSidebar
@@ -637,13 +730,14 @@ function App() {
               )}
               {error && <p className="error" style={{ margin: "0.5rem 1.5rem 0" }}>Lỗi: {error}</p>}
               <LibraryScreen
-                items={libItems}
+                items={displayItems}
                 loading={libLoading}
                 error={libError}
                 onRefresh={openLibrary}
                 onCopy={copyUrl}
                 onOpen={(u) => openUrl(u)}
                 onDelete={onDeleteItem}
+                onBulkDelete={onBulkDelete}
                 onEdit={onEditItem}
                 onSaveTitle={onSaveTitle}
               />
@@ -677,6 +771,7 @@ function App() {
       <main className="container">
         {toast && <div className="toast">{toast}</div>}
         {RecPopupOverlay}
+        {DownloadOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
         <div className="topbar">

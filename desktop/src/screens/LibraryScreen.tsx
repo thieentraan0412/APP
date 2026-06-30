@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { LibraryItem } from "../lib/api";
 
 interface Props {
@@ -9,6 +9,7 @@ interface Props {
   onCopy: (url: string) => void;
   onOpen: (url: string) => void;
   onDelete: (id: string) => void;
+  onBulkDelete: (ids: string[]) => Promise<boolean>;
   onEdit: (item: LibraryItem) => void;
   onSaveTitle: (id: string, title: string) => void;
 }
@@ -29,6 +30,24 @@ function endOfDay(s: string): number {
   return new Date(y, m - 1, d, 23, 59, 59, 999).getTime();
 }
 
+// yyyy-mm-dd (giá trị thật) -> dd/mm/yyyy (hiển thị)
+function isoToDisplay(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : "";
+}
+// dd/mm/yyyy (gõ tay) -> yyyy-mm-dd | "" nếu rỗng | null nếu chưa hợp lệ
+function displayToIso(s: string): string | null {
+  const t = s.trim();
+  if (t === "") return "";
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(t);
+  if (!m) return null;
+  const d = +m[1], mo = +m[2], y = +m[3];
+  const dt = new Date(y, mo - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${y}-${p(mo)}-${p(d)}`;
+}
+
 // ── SVG icons (explicit w/h để tránh browser default 300×150) ──
 const S = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
 const Ss = { ...S, width: 16, height: 16 };
@@ -42,10 +61,65 @@ const IcoEdit = () => <svg {...Ss}><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2
 const IcoTag = () => <svg {...Ss}><path d="M20.59 13.41 12 22l-9-9V3h10l7.59 7.59a2 2 0 0 1 0 2.82Z"/><circle cx="7.5" cy="7.5" r="1.4"/></svg>;
 const IcoTrash = () => <svg {...Ss}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>;
 const IcoFilm = () => <svg {...Ss}><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>;
+const IcoGrid = () => <svg {...Ss}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>;
+const IcoList = () => <svg {...Ss}><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>;
+const IcoCheckSquare = () => <svg {...Ss}><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>;
+const IcoClose = () => <svg {...Ss}><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>;
+const IcoCalendar = () => <svg {...Ss}><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>;
+
+// Ô chọn ngày hiển thị dd/mm/yyyy (gõ tay được) + nút lịch dùng bộ chọn ngày gốc.
+function DateField({ value, min, max, onChange }: {
+  value: string; min?: string; max?: string; onChange: (iso: string) => void;
+}) {
+  const [draft, setDraft] = useState(() => isoToDisplay(value));
+  const pickerRef = useRef<HTMLInputElement>(null);
+  // Đồng bộ ô hiển thị khi giá trị đổi từ bên ngoài (nút Hôm nay/7 ngày…, hoặc chọn lịch)
+  useEffect(() => { setDraft(isoToDisplay(value)); }, [value]);
+
+  function openPicker() {
+    const el = pickerRef.current;
+    if (!el) return;
+    if (typeof el.showPicker === "function") el.showPicker();
+    else el.focus();
+  }
+
+  return (
+    <span className="lib-datefield">
+      <input
+        className="lib-date lib-date--text"
+        type="text"
+        inputMode="numeric"
+        placeholder="dd/mm/yyyy"
+        value={draft}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const iso = displayToIso(e.target.value);
+          if (iso !== null) onChange(iso); // chỉ cập nhật khi đã đủ/đúng định dạng
+        }}
+        onBlur={() => setDraft(isoToDisplay(value))} // gõ dở → trả về giá trị hợp lệ gần nhất
+      />
+      <button type="button" className="lib-date-cal" onClick={openPicker} title="Chọn ngày" aria-label="Chọn ngày">
+        <IcoCalendar />
+      </button>
+      {/* Input ngày gốc (ẩn) chỉ để mở lịch chọn ngày */}
+      <input
+        ref={pickerRef}
+        type="date"
+        className="lib-date-native"
+        value={value}
+        min={min}
+        max={max}
+        onChange={(e) => onChange(e.target.value)}
+        tabIndex={-1}
+        aria-hidden
+      />
+    </span>
+  );
+}
 
 // ── Main component ─────────────────────────────────────────
 export function LibraryScreen(props: Props) {
-  const { items, loading, error, onRefresh, onCopy, onOpen, onDelete, onEdit, onSaveTitle } = props;
+  const { items, loading, error, onRefresh, onCopy, onOpen, onDelete, onBulkDelete, onEdit, onSaveTitle } = props;
 
   const todayStr = toInputDate(new Date());
   const [query, setQuery] = useState("");
@@ -54,9 +128,17 @@ export function LibraryScreen(props: Props) {
   const [range, setRange] = useState<"today" | "7" | "30" | "all">("today");
   const [typeFilter, setTypeFilter] = useState<"all" | "image" | "video">("all");
   const [sortOrder, setSortOrder] = useState<"newest" | "oldest">("newest");
+  const [viewMode, setViewMode] = useState<"grid" | "list">(
+    () => (localStorage.getItem("lib-view") === "list" ? "list" : "grid")
+  );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const editingRef = useRef<string | null>(null);
+
+  // Chọn nhiều để xoá
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
 
   function startEdit(it: LibraryItem) {
     editingRef.current = it.id;
@@ -71,6 +153,11 @@ export function LibraryScreen(props: Props) {
     if (save) onSaveTitle(id, draft.trim());
   }
 
+  function changeView(v: "grid" | "list") {
+    setViewMode(v);
+    try { localStorage.setItem("lib-view", v); } catch {}
+  }
+
   function setRangePreset(r: typeof range) {
     setRange(r);
     if (r === "all") { setFrom(""); setTo(""); return; }
@@ -81,6 +168,29 @@ export function LibraryScreen(props: Props) {
     start.setDate(today.getDate() - (r === "7" ? 6 : 29));
     setFrom(toInputDate(start));
     setTo(end);
+  }
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+  function exitSelect() {
+    setSelectMode(false);
+    setSelected(new Set());
+  }
+  async function handleBulkDelete() {
+    if (selected.size === 0) return;
+    setDeleting(true);
+    try {
+      const ok = await onBulkDelete(Array.from(selected));
+      if (ok) exitSelect();
+    } finally {
+      setDeleting(false);
+    }
   }
 
   const filtered = useMemo(() => {
@@ -96,6 +206,16 @@ export function LibraryScreen(props: Props) {
     return list;
   }, [items, query, from, to, typeFilter, sortOrder]);
 
+  const allFilteredSelected = filtered.length > 0 && filtered.every((it) => selected.has(it.id));
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allFilteredSelected) filtered.forEach((it) => next.delete(it.id));
+      else filtered.forEach((it) => next.add(it.id));
+      return next;
+    });
+  }
+
   return (
     <main className="lib-main">
         <div className="lib-inner">
@@ -104,6 +224,13 @@ export function LibraryScreen(props: Props) {
           <div className="lib-head">
             <h1 className="lib-title">Thư viện nội dung</h1>
             <div className="lib-head-actions">
+              <button
+                className={`lib-btn lib-btn--secondary${selectMode ? " lib-btn--active" : ""}`}
+                onClick={() => (selectMode ? exitSelect() : setSelectMode(true))}
+                disabled={loading}
+              >
+                {selectMode ? <IcoClose /> : <IcoCheckSquare />}{selectMode ? "Huỷ chọn" : "Chọn"}
+              </button>
               <button className="lib-btn lib-btn--secondary" onClick={onRefresh} disabled={loading}>
                 <IcoRefresh />{loading ? "Đang tải…" : "Làm mới"}
               </button>
@@ -128,13 +255,13 @@ export function LibraryScreen(props: Props) {
           <div className="lib-filters">
             <div className="lib-field">
               <label>Từ:</label>
-              <input className="lib-date" type="date" value={from} max={to || undefined}
-                onChange={(e) => { setFrom(e.target.value); setRange("all"); }} />
+              <DateField value={from} max={to || undefined}
+                onChange={(v) => { setFrom(v); setRange("all"); }} />
             </div>
             <div className="lib-field">
               <label>Đến:</label>
-              <input className="lib-date" type="date" value={to} min={from || undefined}
-                onChange={(e) => { setTo(e.target.value); setRange("all"); }} />
+              <DateField value={to} min={from || undefined}
+                onChange={(v) => { setTo(v); setRange("all"); }} />
             </div>
 
             <div className="lib-segment">
@@ -163,7 +290,34 @@ export function LibraryScreen(props: Props) {
             </div>
 
             <span className="lib-count">{filtered.length}/{items.length} mục</span>
+
+            <div className="lib-viewtoggle">
+              <button type="button" className={viewMode === "grid" ? "active" : ""} onClick={() => changeView("grid")} title="Dạng lưới" aria-label="Dạng lưới">
+                <IcoGrid />
+              </button>
+              <button type="button" className={viewMode === "list" ? "active" : ""} onClick={() => changeView("list")} title="Dạng danh sách" aria-label="Dạng danh sách">
+                <IcoList />
+              </button>
+            </div>
           </div>
+
+          {/* Thanh chọn nhiều */}
+          {selectMode && (
+            <div className="lib-bulkbar">
+              <span className="lib-bulk-count">Đã chọn {selected.size}</span>
+              <button className="lib-btn lib-btn--secondary" onClick={toggleSelectAll} disabled={filtered.length === 0}>
+                {allFilteredSelected ? "Bỏ chọn tất cả" : "Chọn tất cả"}
+              </button>
+              <div className="lib-bulk-spacer" />
+              <button
+                className="lib-btn lib-btn--danger"
+                onClick={handleBulkDelete}
+                disabled={selected.size === 0 || deleting}
+              >
+                <IcoTrash />{deleting ? "Đang xoá…" : `Xoá (${selected.size})`}
+              </button>
+            </div>
+          )}
 
           {/* Grid */}
           {!loading && items.length === 0 && !error && (
@@ -179,14 +333,28 @@ export function LibraryScreen(props: Props) {
             </div>
           )}
 
-          <div className="lib-grid">
-            {filtered.map((it) => (
-              <article className="lib-card" key={it.id}>
+          <div className={viewMode === "list" ? "lib-list" : "lib-grid"}>
+            {filtered.map((it) => {
+              const isSelected = selected.has(it.id);
+              return (
+              <article
+                className={`lib-card${selectMode ? " lib-card--selectable" : ""}${isSelected ? " lib-card--selected" : ""}`}
+                key={it.id}
+                onClick={selectMode ? () => toggleSelect(it.id) : undefined}
+              >
+                {selectMode && (
+                  <span className={`lib-check${isSelected ? " lib-check--on" : ""}`} aria-hidden>
+                    {isSelected && (
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="#fff" strokeWidth={3} strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    )}
+                  </span>
+                )}
+
                 {/* Thumbnail */}
                 <div
                   className={`lib-thumb ${it.type === "video" ? "lib-thumb--video" : "lib-thumb--image"}`}
-                  onClick={() => onOpen(it.url)}
-                  title="Mở link"
+                  onClick={selectMode ? undefined : () => onOpen(it.url)}
+                  title={selectMode ? undefined : "Mở link"}
                 >
                   {it.type === "image" ? (
                     <img src={it.fileUrl} alt={it.title ?? it.id} loading="lazy" />
@@ -197,7 +365,7 @@ export function LibraryScreen(props: Props) {
 
                 {/* Title */}
                 <div className="lib-card-body">
-                  {editingId === it.id ? (
+                  {!selectMode && editingId === it.id ? (
                     <input
                       className="lib-title-input"
                       autoFocus
@@ -211,7 +379,11 @@ export function LibraryScreen(props: Props) {
                       onBlur={() => finishEdit(true)}
                     />
                   ) : (
-                    <div className="lib-card-title" onClick={() => startEdit(it)} title="Bấm để sửa tiêu đề">
+                    <div
+                      className="lib-card-title"
+                      onClick={selectMode ? undefined : () => startEdit(it)}
+                      title={selectMode ? undefined : "Bấm để sửa tiêu đề"}
+                    >
                       {it.title || <span className="lib-untitled">(không tiêu đề)</span>}
                     </div>
                   )}
@@ -225,18 +397,21 @@ export function LibraryScreen(props: Props) {
                   </div>
 
                   {/* Actions */}
-                  <div className="lib-card-actions">
-                    <button className="lib-ico" onClick={() => onCopy(it.url)} title="Copy link"><IcoCopy /></button>
-                    <button className="lib-ico" onClick={() => onOpen(it.url)} title="Mở link"><IcoLink /></button>
-                    <button className="lib-ico" onClick={() => startEdit(it)} title="Đổi tiêu đề"><IcoTag /></button>
-                    {it.type === "image" && (
-                      <button className="lib-ico" onClick={() => onEdit(it)} title="Sửa annotate"><IcoEdit /></button>
-                    )}
-                    <button className="lib-ico lib-ico--danger" onClick={() => onDelete(it.id)} title="Xoá"><IcoTrash /></button>
-                  </div>
+                  {!selectMode && (
+                    <div className="lib-card-actions">
+                      <button className="lib-ico" onClick={() => onCopy(it.url)} title="Copy link"><IcoCopy /></button>
+                      <button className="lib-ico" onClick={() => onOpen(it.url)} title="Mở link"><IcoLink /></button>
+                      <button className="lib-ico" onClick={() => startEdit(it)} title="Đổi tiêu đề"><IcoTag /></button>
+                      {it.type === "image" && (
+                        <button className="lib-ico" onClick={() => onEdit(it)} title="Sửa annotate"><IcoEdit /></button>
+                      )}
+                      <button className="lib-ico lib-ico--danger" onClick={() => onDelete(it.id)} title="Xoá"><IcoTrash /></button>
+                    </div>
+                  )}
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
 
         </div>

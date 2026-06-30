@@ -786,6 +786,23 @@ kbd {
   background-repeat: no-repeat; background-position: right 8px center;
 }
 
+/* Ô ngày dd/mm/yyyy tùy biến (thay native date để hiện đúng ngày/tháng/năm) */
+.lib-datefield { position: relative; display: inline-block; }
+.lib-date--text { width: 120px; padding-right: 30px; }
+.lib-date-cal {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  width: 26px; height: 26px; padding: 0; border: none; background: transparent;
+  border-radius: 6px; cursor: pointer; color: #6b7280;
+  display: flex; align-items: center; justify-content: center;
+}
+.lib-date-cal svg { width: 16px; height: 16px; }
+.lib-date-cal:hover { background: #eceef1; color: #1f2430; }
+.lib-date-cal:active { transform: translateY(-50%); }
+.lib-date-native {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; pointer-events: none; border: 0; padding: 0; margin: 0;
+}
+
 .lib-segment {
   display: inline-flex;
   background: #f2f3f5;
@@ -910,3 +927,113 @@ kbd {
 .lib-ico svg { width: 16px; height: 16px; display: block; }
 .lib-ico:hover { background: #f2f3f5; color: #374151; }
 .lib-ico--danger:hover { background: #fef2f2; color: #ef4444; }
+
+/* View toggle (lưới / danh sách) */
+.lib-viewtoggle {
+  display: inline-flex;
+  background: #eceef1;
+  border: 1px solid #e0e3e8;
+  border-radius: 9px;
+  padding: 3px;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.lib-viewtoggle button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  width: 34px;
+  height: 30px;
+  padding: 0;            /* reset padding mặc định của <button> để icon không bị bóp */
+  border-radius: 7px;
+  color: #6b7280;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.lib-viewtoggle button svg { width: 18px; height: 18px; display: block; }
+.lib-viewtoggle button:hover { background: #e2e5ea; color: #1f2430; }
+.lib-viewtoggle button.active {
+  background: #fff;
+  color: #4f46e5;
+  box-shadow: 0 1px 2px rgba(16,24,40,0.14);
+}
+.lib-viewtoggle button.active:hover { background: #fff; }
+
+/* List view (dạng danh sách) */
+.lib-list { display: flex; flex-direction: column; gap: 10px; }
+.lib-list .lib-card { flex-direction: row; align-items: stretch; }
+.lib-list .lib-thumb {
+  width: 150px; flex-shrink: 0; aspect-ratio: 16/10;
+}
+.lib-list .lib-card-body {
+  flex: 1; flex-direction: row; align-items: center; gap: 16px; padding: 10px 16px;
+}
+.lib-list .lib-card-title { flex: 1; min-width: 0; }
+.lib-list .lib-title-input { flex: 1; }
+.lib-list .lib-card-meta {
+  flex: 0 0 auto; justify-content: flex-start; gap: 10px;
+}
+.lib-list .lib-card-time { font-size: 12px; }
+.lib-list .lib-card-actions {
+  flex: 0 0 auto; border-top: none; padding-top: 0;
+}
+
+@media (max-width: 640px) {
+  .lib-list .lib-thumb { width: 96px; }
+  .lib-list .lib-card-body { flex-wrap: wrap; gap: 8px 12px; padding: 10px 12px; }
+}
+
+/* Chọn nhiều để xoá */
+.lib-btn--active { background: #eef0ff; color: #4f46e5; border-color: #c7ccff; }
+.lib-btn--danger { background: #fef2f2; color: #dc2626; border-color: #fca5a5; }
+.lib-btn--danger:hover:not(:disabled) { background: #fee2e2; border-color: #f87171; }
+.lib-btn--danger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.lib-bulkbar {
+  display: flex; align-items: center; gap: 10px;
+  background: #eef0ff; border: 1px solid #d6dafe;
+  border-radius: 10px; padding: 10px 14px; margin-bottom: 16px;
+}
+.lib-bulk-count { font-weight: 700; color: #4f46e5; font-size: 14px; }
+.lib-bulk-spacer { flex: 1; }
+
+.lib-card { position: relative; }
+.lib-card--selectable, .lib-card--selectable .lib-thumb, .lib-card--selectable .lib-card-title {
+  cursor: pointer; user-select: none;
+}
+.lib-card--selected { border-color: #4f46e5; box-shadow: 0 0 0 2px rgba(79,70,229,0.45); }
+.lib-card--selected:hover { border-color: #4f46e5; }
+
+.lib-check {
+  position: absolute; top: 10px; left: 10px; z-index: 3;
+  width: 22px; height: 22px; border-radius: 6px;
+  background: rgba(255,255,255,0.95); border: 2px solid #cbd1da;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+}
+.lib-check--on { background: #4f46e5; border-color: #4f46e5; }
+
+/* Thanh tiến độ tải bộ quay video (ffmpeg) */
+.dl-banner {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  z-index: 9998; width: 380px; max-width: 90vw;
+  background: #1c1c1e; color: #fff; border-radius: 12px;
+  padding: 14px 16px; box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+}
+.dl-banner-head {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 13.5px; margin-bottom: 10px; gap: 12px;
+}
+.dl-banner-pct { font-weight: 700; font-variant-numeric: tabular-nums; }
+.dl-bar { height: 8px; background: #3a3a3c; border-radius: 4px; overflow: hidden; }
+.dl-bar-fill { height: 100%; background: #3b82f6; border-radius: 4px; transition: width 0.2s; }
+.dl-bar-fill--indeterminate {
+  width: 40%;
+  animation: dl-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes dl-indeterminate {
+  0% { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}

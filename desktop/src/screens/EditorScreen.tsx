@@ -140,24 +140,61 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setSelectedId(null);
   }
 
-  async function copyImage() {
-    if (!stageRef.current || !img) return;
-    const prevSelected = selectedId;
-    setSelectedId(null);
-    await new Promise((r) => requestAnimationFrame(() => r(null)));
+  // Xuất ảnh đã gộp (nền + khung + mũi tên + bước + ghi chú) ra PNG.
+  // Ẩn khung chọn (Transformer) tạm thời để không bị vẽ vào ảnh — nhưng KHÔNG bỏ chọn
+  // để người dùng giữ nguyên phần tử đang chọn.
+  function buildFlattenedPng(): Blob | null {
+    const stage = stageRef.current;
+    if (!stage || !img) return null;
+    const tr = stage.findOne("Transformer") as Konva.Transformer | undefined;
+    const trVisible = tr?.visible() ?? false;
+    if (tr && trVisible) {
+      tr.visible(false);
+      tr.getLayer()?.batchDraw();
+    }
     try {
-      const pixelRatio = 1 / fit.scale;
-      const dataUrl = stageRef.current.toDataURL({ mimeType: "image/png", pixelRatio });
-      const blob = dataUrlToBlob(dataUrl);
+      const pixelRatio = 1 / fit.scale; // xuất đúng độ phân giải gốc
+      const dataUrl = stage.toDataURL({ mimeType: "image/png", pixelRatio });
+      return dataUrlToBlob(dataUrl);
+    } finally {
+      if (tr && trVisible) {
+        tr.visible(true);
+        tr.getLayer()?.batchDraw();
+      }
+    }
+  }
+
+  async function copyImage() {
+    const blob = buildFlattenedPng();
+    if (!blob) return;
+    try {
       await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
       setCopyMsg("Đã copy ảnh ✓");
     } catch {
       setCopyMsg("Copy thất bại");
     } finally {
-      setSelectedId(prevSelected);
       window.setTimeout(() => setCopyMsg(null), 1800);
     }
   }
+
+  // Tự đồng bộ clipboard hệ thống với ảnh đã chú thích.
+  // Khi chụp xong, Rust copy ảnh GỐC vào clipboard; mỗi khi thêm/sửa khung, mũi tên,
+  // bước, ghi chú… ta ghi đè bằng ảnh đã gộp để Ctrl+V ở app khác ra đúng ảnh có chú thích
+  // (không cần bấm Ctrl+C thủ công). Debounce để tránh ghi clipboard liên tục khi đang vẽ.
+  useEffect(() => {
+    if (!img) return;
+    const t = window.setTimeout(async () => {
+      try {
+        const blob = buildFlattenedPng();
+        if (!blob) return;
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      } catch {
+        // Bỏ qua: thường do cửa sổ mất focus — vẫn còn nút/Ctrl+C để copy thủ công.
+      }
+    }, 300);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [img, boxes, arrows, steps, notes, fit.scale]);
 
   async function handleSave() {
     if (!stageRef.current || !img) return;

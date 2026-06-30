@@ -61,8 +61,28 @@ fn start(app: &AppHandle) {
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
-        match command.spawn() {
-            Ok(mut child) => {
+        // Thử spawn nhiều lần: ngay sau khi tải, Windows Defender có thể đang quét &
+        // khóa ffmpeg.exe (os error 32). Chờ rồi thử lại để khỏi báo lỗi oan.
+        let mut spawned = None;
+        let mut last_err = String::new();
+        for attempt in 0..8 {
+            match command.spawn() {
+                Ok(child) => {
+                    spawned = Some(child);
+                    break;
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                    if attempt == 0 {
+                        let _ = app.emit("ffmpeg-preparing", ());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(700));
+                }
+            }
+        }
+
+        match spawned {
+            Some(mut child) => {
                 {
                     let st = app.state::<RecState>();
                     *st.stdin.lock().unwrap() = child.stdin.take();
@@ -83,8 +103,8 @@ fn start(app: &AppHandle) {
                     let _ = win.set_focus();
                 }
             }
-            Err(e) => {
-                let _ = app.emit("video-error", format!("Không quay được: {e}"));
+            None => {
+                let _ = app.emit("video-error", format!("Không quay được: {last_err}"));
             }
         }
     });

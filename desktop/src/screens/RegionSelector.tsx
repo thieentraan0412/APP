@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export function RegionSelector() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -16,7 +17,21 @@ export function RegionSelector() {
       if (e.key === "Escape") invoke("cancel_region_capture").catch(() => {});
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+
+    // Cửa sổ overlay được dùng lại (ẩn/hiện), nên canvas vẫn giữ vùng kéo của lần trước.
+    // Mỗi lần overlay mở lại (được focus), xoá sạch để không hiện lại vùng chọn cũ.
+    const unlistenP = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (!focused) return;
+      drag.current = null;
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      drawDim(); // canvas trống → không còn viền/nhãn cũ
+    });
+
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      unlistenP.then((un) => un());
+    };
   }, []);
 
   function drawDim(rect?: { x: number; y: number; w: number; h: number }) {
