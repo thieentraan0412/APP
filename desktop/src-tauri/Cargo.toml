@@ -33,6 +33,8 @@ arboard = "3"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "default-tls"] }
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
+tauri-plugin-notification = "2"
+tauri-plugin-dialog = "2"
 
 # Tối ưu thời gian BUILD (app nhẹ nên không cần tối ưu runtime cao):
 # opt-level 1 + nhiều codegen-units -> compile nhanh hơn nhiều so với mặc định (opt-level 3).

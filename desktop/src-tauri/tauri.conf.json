@@ -18,6 +18,20 @@
         "height": 680
       },
       {
+        "label": "rec_notify",
+        "title": "",
+        "url": "/",
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "width": 260,
+        "height": 54,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false
+      },
+      {
         "label": "region_selector",
         "title": "",
         "url": "/",

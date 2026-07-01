@@ -5,6 +5,9 @@ import { Toolbar } from "../components/Toolbar";
 import { flattenStage, dataUrlToBlob } from "../lib/flatten";
 import type { Annotations, Arrow, Box, Note, StepMarker, Tool } from "../types";
 import { nanoid } from "nanoid";
+import jsQR from "jsqr";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 type ClipItem =
   | { kind: "box"; data: Box }
@@ -40,10 +43,46 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const appliedInit = useRef(false);
   const clipboard = useRef<ClipItem | null>(null);
 
-  // Tải ảnh từ data URL
+  type QrState = { found: true; text: string; isUrl: boolean } | { found: false } | null;
+  const [qrResult, setQrResult] = useState<QrState>(null);
+
+  function isHttpUrl(s: string): boolean {
+    try { const u = new URL(s); return u.protocol === "http:" || u.protocol === "https:"; } catch { return false; }
+  }
+
+  function runQrDecode(source: HTMLImageElement, silent: boolean) {
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = source.width;
+      canvas.height = source.height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { if (!silent) setQrResult({ found: false }); return; }
+      ctx.drawImage(source, 0, 0);
+      const imageData = ctx.getImageData(0, 0, source.width, source.height);
+      const code = jsQR(imageData.data, source.width, source.height);
+      if (code) {
+        setQrResult({ found: true, text: code.data, isUrl: isHttpUrl(code.data) });
+      } else if (!silent) {
+        setQrResult({ found: false });
+      }
+    } catch { if (!silent) setQrResult({ found: false }); }
+  }
+
+  function scanQr() {
+    const img = new Image();
+    img.onload = () => runQrDecode(img, true);
+    img.onerror = () => {};
+    img.src = imageDataUrl;
+  }
+
+  // Tải ảnh từ data URL, đồng thời auto-scan QR (im lặng nếu không tìm thấy)
   useEffect(() => {
+    setQrResult(null);
     const image = new Image();
-    image.onload = () => setImg(image);
+    image.onload = () => {
+      setImg(image);
+      runQrDecode(image, true);
+    };
     image.src = imageDataUrl;
   }, [imageDataUrl]);
 
@@ -224,9 +263,60 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     onSaved(blob, original, annotations, title.trim());
   }
 
+  const QrModal = qrResult !== null ? (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
+    }}>
+      <div style={{
+        background: "#1c1c1e", color: "#fff", borderRadius: 14, padding: "22px 24px",
+        width: 400, maxWidth: "90vw", boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+      }}>
+        {!qrResult.found ? (
+          <>
+            <h3 style={{ margin: "0 0 12px" }}>Không phát hiện mã QR</h3>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={() => setQrResult(null)}>Đóng</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h3 style={{ margin: "0 0 10px" }}>Mã QR</h3>
+            <div style={{
+              background: "#000", borderRadius: 8, padding: "10px 12px",
+              marginBottom: 14, wordBreak: "break-all", fontSize: 13,
+              maxHeight: 150, overflow: "auto", lineHeight: 1.5,
+            }}>
+              {qrResult.text}
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+              {qrResult.isUrl && (
+                <>
+                  <button className="primary" onClick={() => openUrl(qrResult.text)}>
+                    Mở trên trình duyệt
+                  </button>
+                  <button onClick={() => { writeText(qrResult.text); setQrResult(null); }}>
+                    Copy link
+                  </button>
+                </>
+              )}
+              {!qrResult.isUrl && (
+                <button onClick={() => { writeText(qrResult.text); setQrResult(null); }}>
+                  Copy
+                </button>
+              )}
+              <button onClick={() => setQrResult(null)}>Đóng</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <div className="editor">
       {copyMsg && <div className="toast">{copyMsg}</div>}
+      {QrModal}
       <Toolbar
         tool={tool}
         setTool={setTool}
@@ -237,6 +327,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         saving={saving}
         title={title}
         setTitle={setTitle}
+        onScanQr={scanQr}
       />
       <div className="canvas-area">
         {img && (

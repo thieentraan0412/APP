@@ -10,10 +10,11 @@ interface Props {
   saving: boolean;
   title: string;
   setTitle: (t: string) => void;
+  onScanQr: () => void;
 }
 
 export function Toolbar(props: Props) {
-  const { tool, setTool, onDelete, canDelete, onBack, onSave, saving, title, setTitle } = props;
+  const { tool, setTool, onDelete, canDelete, onBack, onSave, saving, title, setTitle, onScanQr } = props;
   return (
     <div className="toolbar">
       <button className={tool === "select" ? "active" : ""} onClick={() => setTool("select")}>
@@ -33,6 +34,9 @@ export function Toolbar(props: Props) {
       </button>
       <button onClick={onDelete} disabled={!canDelete}>
         🗑 Xoá
+      </button>
+      <button onClick={onScanQr} title="Quét mã QR trong ảnh">
+        ▦ QR
       </button>
       <span style={{ flex: 1 }} />
       <input

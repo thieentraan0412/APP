@@ -13,6 +13,8 @@
     "clipboard-manager:allow-write-image",
     "updater:default",
     "process:allow-restart",
+    "notification:default",
+    "dialog:allow-save",
     {
       "identifier": "fs:allow-read-file",
       "allow": [{ "path": "$TEMP/**" }]

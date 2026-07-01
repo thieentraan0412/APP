@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, LogicalPosition, Manager};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -89,6 +89,28 @@ fn start(app: &AppHandle) {
                     *st.recording.lock().unwrap() = true;
                 }
                 let _ = app.emit("recording-started", ());
+                // Hiện cửa sổ thông báo nhỏ ở góc phải màn hình, tự ẩn sau 500ms
+                if let Some(notify) = app.get_webview_window("rec_notify") {
+                    if let Ok(Some(mon)) = notify.primary_monitor() {
+                        let scale = mon.scale_factor();
+                        let mw = mon.size().width as f64 / scale;
+                        let mh = mon.size().height as f64 / scale;
+                        let mx = mon.position().x as f64 / scale;
+                        let my = mon.position().y as f64 / scale;
+                        let _ = notify.set_position(LogicalPosition::new(
+                            mx + (mw - 260.0) / 2.0,
+                            my + (mh - 54.0) / 2.0,
+                        ));
+                    }
+                    let _ = notify.show();
+                    let app2 = app.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if let Some(n) = app2.get_webview_window("rec_notify") {
+                            let _ = n.hide();
+                        }
+                    });
+                }
 
                 // Chờ ffmpeg kết thúc (sau khi nhận 'q') → báo frontend file để upload.
                 let _ = child.wait();
@@ -113,6 +135,15 @@ fn start(app: &AppHandle) {
 fn stop(app: &AppHandle) {
     *app.state::<RecState>().recording.lock().unwrap() = false;
     let _ = app.emit("recording-stopped", ());
+    // Ẩn thông báo quay nếu vẫn còn hiện
+    if let Some(notify) = app.get_webview_window("rec_notify") {
+        let _ = notify.hide();
+    }
+    // Hiện app ngay khi dừng quay (không đợi video encode xong)
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
 
     // Gửi 'q' để ffmpeg ghi nốt và đóng file mp4 hợp lệ (không cắt cụt).
     if let Some(mut stdin) = app.state::<RecState>().stdin.lock().unwrap().take() {

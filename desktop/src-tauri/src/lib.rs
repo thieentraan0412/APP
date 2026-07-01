@@ -71,6 +71,11 @@ fn remove_temp(path: String) {
 }
 
 #[tauri::command]
+fn save_video_to_path(src: String, dst: String) -> Result<(), String> {
+    std::fs::copy(&src, &dst).map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn toggle_recording_cmd(app: AppHandle) {
     record::toggle_recording(&app);
 }
@@ -84,6 +89,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(record::RecState::default())
         .manage(ShortcutCfg::default())
         .manage(capture::RegionState::default())
@@ -151,6 +158,7 @@ pub fn run() {
             capture::cancel_region_capture,
             set_shortcuts,
             remove_temp,
+            save_video_to_path,
             toggle_recording_cmd
         ])
         .run(tauri::generate_context!())

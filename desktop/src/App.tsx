@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { writeText, readImage } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import jsQR from "jsqr";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { EditorScreen } from "./screens/EditorScreen";
 import { LibraryScreen } from "./screens/LibraryScreen";
@@ -24,6 +25,7 @@ import {
 } from "./lib/api";
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage";
@@ -56,8 +58,8 @@ function checkUsageWarnings(stats: UsageStats): string[] {
   return warns;
 }
 
-function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onRecord, onUsage, onSettings, recording, usageWarnings }: {
-  screen: Screen; onHome: () => void; onCapture: () => void; onRegionCapture: () => void; onRecord: () => void;
+function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, onRecord, onUsage, onSettings, recording, usageWarnings }: {
+  screen: Screen; onHome: () => void; onCapture: () => void; onRegionCapture: () => void; onQrScan: () => void; onRecord: () => void;
   onUsage: () => void; onSettings: () => void; recording: boolean; usageWarnings: string[];
 }) {
   const hasWarn = usageWarnings.length > 0;
@@ -71,6 +73,14 @@ function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onRecord, o
       </button>
       <button className="lib-tool" onClick={onRegionCapture} title="Chụp vùng màn hình (Ctrl+Shift+3)">
         <svg {...SidebarS}><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+      </button>
+      <button className="lib-tool" onClick={onQrScan} title="Quét mã QR từ màn hình">
+        <svg {...SidebarS}>
+          <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="5" y="5" width="3" height="3" fill="currentColor" stroke="none"/>
+          <rect x="14" y="3" width="7" height="7" rx="1"/><rect x="16" y="5" width="3" height="3" fill="currentColor" stroke="none"/>
+          <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="5" y="16" width="3" height="3" fill="currentColor" stroke="none"/>
+          <rect x="14" y="14" width="3" height="3"/><rect x="18" y="14" width="3" height="3"/><rect x="14" y="18" width="3" height="3"/><rect x="18" y="18" width="3" height="3"/>
+        </svg>
       </button>
       <button className={`lib-tool${recording ? " lib-tool--recording" : ""}`} onClick={onRecord} title="Quay / dừng video">
         <svg {...SidebarS}><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>
@@ -130,13 +140,26 @@ function App() {
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [ffmpegDl, setFfmpegDl] = useState<number | null>(null); // null=không tải, -1=không rõ %, 0..100=phần trăm
-  const [recPopup, setRecPopup] = useState<"start" | "stop" | null>(null);
+  // recPopup đã bỏ — thông báo quay được chuyển sang toast hệ thống (Rust)
   const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void; onCancel?: () => void } | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageWarnings, setUsageWarnings] = useState<string[]>([]);
   const [warnDismissed, setWarnDismissed] = useState(false);
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
+
+  // Video chờ lưu (chưa upload)
+  const [videoPendingReady, setVideoPendingReady] = useState(false);
+  const videoPendingRef = useRef<{ blob: Blob; path: string } | null>(null);
+  // Ref luôn trỏ đến handleVideoReady mới nhất — tránh stale closure trong useEffect
+  const videoReadyHandlerRef = useRef<(path: string) => Promise<void>>(async () => {});
+  const saveVideoRef = useRef<() => Promise<void>>(async () => {});
+  const videoTitleInputRef = useRef<HTMLInputElement>(null);
+
+  // QR scan
+  const qrModeRef = useRef(false);
+  type QrState = { found: true; text: string; isUrl: boolean } | { found: false } | null;
+  const [qrResult, setQrResult] = useState<QrState>(null);
 
   // Tự động cập nhật
   const [update, setUpdate] = useState<Update | null>(null);
@@ -170,6 +193,12 @@ function App() {
 
   const screenRef = useRef<Screen>("library");
   useEffect(() => { screenRef.current = screen; }, [screen]);
+
+  // Luôn giữ refs trỏ đến handler hiện tại — tránh stale closure trong useEffect
+  useEffect(() => {
+    videoReadyHandlerRef.current = handleVideoReady;
+    saveVideoRef.current = saveVideo;
+  });
 
   useEffect(() => {
     async function handlePaste(e: ClipboardEvent) {
@@ -215,6 +244,11 @@ function App() {
 
     const subs = [
       listen<string>("image-captured", (e) => {
+        if (qrModeRef.current) {
+          qrModeRef.current = false;
+          decodeQr(e.payload);
+          return;
+        }
         setError(null);
         setEditId(null);
         setInitialAnnotations(null);
@@ -222,18 +256,11 @@ function App() {
         setImage(e.payload);
         setScreen("editor");
       }),
+      listen("region-cancelled", () => { qrModeRef.current = false; }),
       listen<string>("capture-error", (e) => setError(e.payload)),
-      listen("recording-started", () => {
-        setRecording(true);
-        setRecPopup("start");
-        window.setTimeout(() => setRecPopup(null), 1000);
-      }),
-      listen("recording-stopped", () => {
-        setRecording(false);
-        setRecPopup("stop");
-        window.setTimeout(() => setRecPopup(null), 1000);
-      }),
-      listen<string>("video-ready", (e) => handleVideoReady(e.payload)),
+      listen("recording-started", () => { setRecording(true); }),
+      listen("recording-stopped", () => { setRecording(false); }),
+      listen<string>("video-ready", (e) => videoReadyHandlerRef.current(e.payload)),
       listen<string>("video-error", (e) => {
         setRecording(false);
         setFfmpegDl(null);
@@ -268,6 +295,23 @@ function App() {
   useEffect(() => {
     checkForUpdate().then((u) => { if (u) setUpdate(u); });
   }, []);
+
+  // Auto-focus ô tiêu đề khi video vừa quay xong
+  useEffect(() => {
+    if (videoPendingReady) {
+      window.setTimeout(() => videoTitleInputRef.current?.focus(), 100);
+    }
+  }, [videoPendingReady]);
+
+  // Ctrl+S trên màn hình result khi video chưa lưu → lưu lên server
+  useEffect(() => {
+    if (screen !== "result" || !videoPendingReady) return;
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); saveVideoRef.current(); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [screen, videoPendingReady]);
 
   // ESC trên màn hình result → quay về trang chủ
   useEffect(() => {
@@ -352,6 +396,7 @@ function App() {
     setResultId(null);
     setVideoTitle("");
     setTitleSaved(false);
+    setVideoPendingReady(false);
   }
 
   function manualRegionCapture() {
@@ -370,6 +415,36 @@ function App() {
     } catch (err) {
       setError(String(err));
     }
+  }
+
+  function isHttpUrl(s: string): boolean {
+    try { const u = new URL(s); return u.protocol === "http:" || u.protocol === "https:"; } catch { return false; }
+  }
+
+  function decodeQr(dataUrl: string) {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, img.width, img.height);
+        const code = jsQR(imageData.data, img.width, img.height);
+        if (code) {
+          setQrResult({ found: true, text: code.data, isUrl: isHttpUrl(code.data) });
+        }
+      } catch {}
+    };
+    img.onerror = () => {};
+    img.src = dataUrl;
+  }
+
+  function triggerQrScan() {
+    qrModeRef.current = true;
+    invoke("start_region_capture").catch(() => { qrModeRef.current = false; });
   }
 
   async function handleSaved(
@@ -417,25 +492,62 @@ function App() {
   }
 
   async function handleVideoReady(path: string) {
+    // Dọn video pending cũ nếu có
+    if (videoPendingRef.current) {
+      invoke("remove_temp", { path: videoPendingRef.current.path }).catch(() => {});
+    }
     setScreen("result");
     resetResult();
     setPreviewType("video");
-    setUploading(true);
     try {
       const bytes = await readFile(path);
       const blob = new Blob([bytes], { type: "video/mp4" });
       setPreview(URL.createObjectURL(blob));
+      videoPendingRef.current = { blob, path };
+      setVideoPendingReady(true);
+    } catch (err) {
+      setUploadError(String(err));
+    }
+  }
+
+  async function saveVideoLocal() {
+    if (!videoPendingRef.current) return;
+    const { path } = videoPendingRef.current;
+    const defaultName = (videoTitle.trim() || "video") + ".mp4";
+    try {
+      const dst = await saveDialog({ defaultPath: defaultName, filters: [{ name: "Video MP4", extensions: ["mp4"] }] });
+      if (!dst) return;
+      await invoke("save_video_to_path", { src: path, dst });
+      showToast("Đã lưu vào máy tính");
+    } catch (err) {
+      showToast("Lưu thất bại: " + String(err));
+    }
+  }
+
+  async function saveVideo() {
+    if (!videoPendingRef.current) return;
+    const { blob, path } = videoPendingRef.current;
+    const titleToSave = videoTitle.trim();
+    setVideoPendingReady(false);
+    setUploading(true);
+    try {
       const { id, url } = await uploadVideo(blob);
       setResultId(id);
       setLink(url);
+      videoPendingRef.current = null;
+      invoke("remove_temp", { path }).catch(() => {});
+      if (titleToSave) {
+        try { await updateTitle(id, titleToSave); setTitleSaved(true); } catch {}
+      }
       try {
         await writeText(url);
         setCopied(true);
       } catch {}
-      // Dọn file video tạm sau khi upload xong
-      invoke("remove_temp", { path }).catch(() => {});
     } catch (err) {
       setUploadError(String(err));
+      // Khôi phục trạng thái pending nếu upload lỗi
+      videoPendingRef.current = { blob, path };
+      setVideoPendingReady(true);
     } finally {
       setUploading(false);
     }
@@ -585,17 +697,68 @@ function App() {
   }
 
   function backHome() {
+    // Xoá file video tạm nếu user bỏ qua không lưu
+    if (videoPendingRef.current) {
+      invoke("remove_temp", { path: videoPendingRef.current.path }).catch(() => {});
+      videoPendingRef.current = null;
+    }
+    setVideoPendingReady(false);
     setImage(null);
     setEditId(null);
     setInitialAnnotations(null);
     openLibrary();
   }
 
-  const RecPopupOverlay = recPopup ? (
-    <div className={`rec-popup ${recPopup}`}>
-      {recPopup === "start" ? "⏺ Bắt đầu quay" : "⏹ Đã dừng quay"}
+  const QrModal = qrResult !== null ? (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
+    }}>
+      <div style={{
+        background: "#1c1c1e", color: "#fff", borderRadius: 14, padding: "22px 24px",
+        width: 400, maxWidth: "90vw", boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+      }}>
+        {!qrResult.found ? (
+          <>
+            <h3 style={{ margin: "0 0 12px" }}>Không phát hiện mã QR</h3>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button onClick={() => setQrResult(null)}>Đóng</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h3 style={{ margin: "0 0 10px" }}>Mã QR</h3>
+            <div style={{
+              background: "#000", borderRadius: 8, padding: "10px 12px",
+              marginBottom: 14, wordBreak: "break-all", fontSize: 13,
+              maxHeight: 150, overflow: "auto", lineHeight: 1.5,
+            }}>
+              {qrResult.text}
+            </div>
+            <div className="row" style={{ justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+              {qrResult.isUrl && (
+                <>
+                  <button className="primary" onClick={() => openUrl(qrResult.text)}>
+                    Mở trên trình duyệt
+                  </button>
+                  <button onClick={() => { writeText(qrResult.text); showToast("Đã copy link"); setQrResult(null); }}>
+                    Copy link
+                  </button>
+                </>
+              )}
+              {!qrResult.isUrl && (
+                <button onClick={() => { writeText(qrResult.text); showToast("Đã copy"); setQrResult(null); }}>
+                  Copy
+                </button>
+              )}
+              <button onClick={() => setQrResult(null)}>Đóng</button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   ) : null;
+
 
   // Thanh tiến độ tải bộ quay video (ffmpeg) — chỉ hiện khi đang tải lần đầu.
   const DownloadOverlay = ffmpegDl !== null ? (
@@ -672,10 +835,11 @@ function App() {
           onBack={editId ? openLibrary : backHome}
           onSaved={handleSaved}
         />
-        {RecPopupOverlay}
+
         {DownloadOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
+        {QrModal}
       </>
     );
   }
@@ -686,15 +850,17 @@ function App() {
     return (
       <div className="lib-layout">
         {toast && <div className="toast">{toast}</div>}
-        {RecPopupOverlay}
+
         {DownloadOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
+        {QrModal}
         <GlobalSidebar
           screen={screen}
           onHome={backHome}
           onCapture={manualCapture}
           onRegionCapture={manualRegionCapture}
+          onQrScan={triggerQrScan}
           onRecord={toggleRecord}
           onUsage={openUsage}
           onSettings={() => setScreen("settings")}
@@ -770,16 +936,33 @@ function App() {
     return (
       <main className="container">
         {toast && <div className="toast">{toast}</div>}
-        {RecPopupOverlay}
+
         {DownloadOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
+        {QrModal}
         <div className="topbar">
           <span className="badge">
-            {uploading ? "Đang tải lên…" : uploadError ? "Lỗi" : "Đã lưu ✓"}
+            {uploading ? "Đang tải lên…" : uploadError ? "Lỗi" : videoPendingReady ? "Chưa lưu" : "Đã lưu ✓"}
           </span>
           <button onClick={backHome}>← Về trang chính</button>
         </div>
+
+        {videoPendingReady && !uploading && (
+          <div className="linkbar">
+            <input
+              ref={videoTitleInputRef}
+              className="link-input"
+              type="text"
+              placeholder="Tiêu đề video (không bắt buộc)"
+              value={videoTitle}
+              onChange={(e) => setVideoTitle(e.target.value)}
+            />
+            <button className="primary" onClick={saveVideo}>💾 Lưu lên server</button>
+            <button onClick={saveVideoLocal}>💻 Lưu vào máy</button>
+            <button style={{ color: "#dc2626", borderColor: "#fca5a5" }} onClick={backHome}>🗑 Huỷ</button>
+          </div>
+        )}
 
         {link && (
           <div className="linkbar">

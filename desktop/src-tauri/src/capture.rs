@@ -160,4 +160,5 @@ pub fn cancel_region_capture(app: AppHandle) {
         let _ = main.show();
         let _ = main.set_focus();
     }
+    let _ = app.emit("region-cancelled", ());
 }

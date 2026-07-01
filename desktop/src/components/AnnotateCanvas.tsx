@@ -38,8 +38,9 @@ export function AnnotateCanvas(props: Props) {
   // Sửa ghi chú trực tiếp tại vị trí note (thay cho prompt)
   const [editing, setEditing] = useState<{ id: string; left: number; top: number } | null>(null);
   const [draft, setDraft] = useState("");
+  const draftRef = useRef("");          // luôn giữ giá trị mới nhất — tránh stale closure
   const editingRef = useRef<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const openedAt = useRef(0);
 
   // Mở ô nhập ngay tại toạ độ note (theo vị trí màn hình)
@@ -49,6 +50,7 @@ export function AnnotateCanvas(props: Props) {
     editingRef.current = id;
     openedAt.current = performance.now();
     setDraft(text);
+    draftRef.current = text;
     setEditing({ id, left: rect.left + stageX, top: rect.top + stageY });
   }
 
@@ -64,12 +66,13 @@ export function AnnotateCanvas(props: Props) {
   }, [editing]);
 
   // Kết thúc sửa: lưu (text rỗng → xoá note) hoặc huỷ (note mới rỗng → xoá)
+  // Dùng draftRef.current thay vì draft để tránh stale closure trong concurrent mode
   function finishNote(save: boolean) {
     const id = editingRef.current;
     if (!id) return;
     editingRef.current = null;
     setEditing(null);
-    const text = draft.trim();
+    const text = draftRef.current.trim();
     if (save) {
       if (!text) {
         setNotes((prev) => prev.filter((x) => x.id !== id));
@@ -78,7 +81,6 @@ export function AnnotateCanvas(props: Props) {
         setNotes((prev) => prev.map((x) => (x.id === id ? { ...x, text } : x)));
       }
     } else {
-      // huỷ: bỏ note nếu nó vẫn đang rỗng (note vừa thêm)
       setNotes((prev) => prev.filter((x) => !(x.id === id && x.text === "")));
     }
   }
@@ -364,24 +366,28 @@ export function AnnotateCanvas(props: Props) {
     </Stage>
 
     {editing && (
-      <input
+      <textarea
         ref={inputRef}
         className="note-edit-input"
         value={draft}
-        placeholder="Nhập ghi chú…"
-        style={{ left: editing.left, top: editing.top, color }}
-        onChange={(e) => setDraft(e.target.value)}
+        placeholder=""
+        rows={3}
+        style={{ left: editing.left, top: editing.top, color, resize: "both", minWidth: 200, minHeight: 70 }}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          draftRef.current = e.target.value;
+        }}
         onKeyDown={(e) => {
-          if (e.key === "Enter") {
+          if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
             finishNote(true);
           } else if (e.key === "Escape") {
             e.preventDefault();
             finishNote(false);
           }
+          // Enter đơn thuần = xuống dòng (textarea default)
         }}
         onBlur={() => {
-          // Bỏ qua blur "giả" ngay sau khi mở (do click trên canvas) — giữ lại focus
           if (performance.now() - openedAt.current < 300) {
             inputRef.current?.focus();
             return;
