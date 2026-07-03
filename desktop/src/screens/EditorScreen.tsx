@@ -96,6 +96,12 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // Phím tắt trong editor
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Đang gõ trong ô nhập (ghi chú / tiêu đề)? Bỏ qua phím tắt toàn cục,
+      // nếu không Backspace/Delete/Escape sẽ xoá luôn note đang soạn.
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
+        return;
+      }
       if (e.key === "Escape") {
         onBack();
         return;

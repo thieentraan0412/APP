@@ -4,7 +4,8 @@ interface Props {
   capture: string;
   record: string;
   region: string;
-  onSave: (capture: string, record: string, region: string) => void;
+  pause: string;
+  onSave: (capture: string, record: string, region: string, pause: string) => void;
   onBack: () => void;
   onCheckUpdate: () => void;
   updateChecking: boolean;
@@ -72,10 +73,11 @@ function ShortcutCapture({
   );
 }
 
-export function SettingsScreen({ capture, record, region, onSave, onBack, onCheckUpdate, updateChecking }: Props) {
+export function SettingsScreen({ capture, record, region, pause, onSave, onBack, onCheckUpdate, updateChecking }: Props) {
   const [cap, setCap] = useState(capture);
   const [rec, setRec] = useState(record);
   const [reg, setReg] = useState(region);
+  const [pau, setPau] = useState(pause);
 
   return (
     <main className="container">
@@ -89,11 +91,12 @@ export function SettingsScreen({ capture, record, region, onSave, onBack, onChec
         <ShortcutCapture label="Chụp ảnh" value={cap} onChange={setCap} />
         <ShortcutCapture label="Chụp vùng màn hình" value={reg} onChange={setReg} />
         <ShortcutCapture label="Quay / dừng video" value={rec} onChange={setRec} />
+        <ShortcutCapture label="Tạm dừng / quay tiếp" value={pau} onChange={setPau} />
         <p className="hint">
           Bấm vào ô bên phải rồi nhấn tổ hợp phím mới (cần ít nhất một phím Ctrl / Shift / Alt).
         </p>
         <div className="row" style={{ justifyContent: "flex-start" }}>
-          <button className="primary" onClick={() => onSave(cap, rec, reg)}>
+          <button className="primary" onClick={() => onSave(cap, rec, reg, pau)}>
             Lưu phím tắt
           </button>
           <button
@@ -101,6 +104,7 @@ export function SettingsScreen({ capture, record, region, onSave, onBack, onChec
               setCap("Control+Shift+1");
               setReg("Control+Shift+3");
               setRec("Control+Shift+2");
+              setPau("Control+Shift+H");
             }}
           >
             Khôi phục mặc định

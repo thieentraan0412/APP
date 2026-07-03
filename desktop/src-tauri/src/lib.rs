@@ -16,11 +16,14 @@ struct ShortcutCfg {
     capture: Mutex<Option<Shortcut>>,
     record:  Mutex<Option<Shortcut>>,
     region:  Mutex<Option<Shortcut>>,
+    pause:   Mutex<Option<Shortcut>>,
 }
 
 const DEFAULT_CAPTURE: &str = "CommandOrControl+Shift+1";
 const DEFAULT_RECORD:  &str = "CommandOrControl+Shift+2";
 const DEFAULT_REGION:  &str = "CommandOrControl+Shift+3";
+// Tạm dừng / quay tiếp khi đang quay video. Cố định (không sửa trong Cài đặt).
+const DEFAULT_PAUSE:   &str = "CommandOrControl+Shift+H";
 
 fn trigger_capture(app: &AppHandle) {
     match capture::capture_primary_png_base64() {
@@ -42,27 +45,31 @@ fn trigger_region_capture(app: &AppHandle) {
     capture::begin_region_capture(app.clone());
 }
 
-fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str) -> Result<(), String> {
+fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str, pause: &str) -> Result<(), String> {
     let cap = Shortcut::from_str(capture).map_err(|e| e.to_string())?;
     let rec = Shortcut::from_str(record).map_err(|e| e.to_string())?;
     let reg = Shortcut::from_str(region).map_err(|e| e.to_string())?;
+    let pause = Shortcut::from_str(pause).map_err(|e| e.to_string())?;
 
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
     gs.register(cap.clone()).map_err(|e| e.to_string())?;
     gs.register(rec.clone()).map_err(|e| e.to_string())?;
     gs.register(reg.clone()).map_err(|e| e.to_string())?;
+    // Không để phím tạm dừng làm hỏng cả cấu hình nếu lỡ trùng phím khác.
+    let _ = gs.register(pause.clone());
 
     let st = app.state::<ShortcutCfg>();
     *st.capture.lock().unwrap() = Some(cap);
     *st.record.lock().unwrap()  = Some(rec);
     *st.region.lock().unwrap()  = Some(reg);
+    *st.pause.lock().unwrap()   = Some(pause);
     Ok(())
 }
 
 #[tauri::command]
-fn set_shortcuts(app: AppHandle, capture: String, record: String, region: String) -> Result<(), String> {
-    apply_shortcuts(&app, &capture, &record, &region)
+fn set_shortcuts(app: AppHandle, capture: String, record: String, region: String, pause: String) -> Result<(), String> {
+    apply_shortcuts(&app, &capture, &record, &region, &pause)
 }
 
 #[tauri::command]
@@ -104,25 +111,29 @@ pub fn run() {
                     let is_cap = st.capture.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
                     let is_rec = st.record.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
                     let is_reg = st.region.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
+                    let is_pause = st.pause.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
                     if is_cap {
                         trigger_capture(app);
                     } else if is_rec {
                         record::toggle_recording(app);
                     } else if is_reg {
                         trigger_region_capture(app);
+                    } else if is_pause {
+                        record::toggle_pause(app);
                     }
                 })
                 .build(),
         )
         .setup(|app| {
-            let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION);
+            let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION, DEFAULT_PAUSE);
 
             let capture_i = MenuItem::with_id(app, "capture", "Chụp màn hình", true, None::<&str>)?;
             let region_i  = MenuItem::with_id(app, "region",  "Chụp vùng",     true, None::<&str>)?;
             let record_i  = MenuItem::with_id(app, "record",  "Quay / Dừng video", true, None::<&str>)?;
+            let pause_i   = MenuItem::with_id(app, "pause",   "Tạm dừng / Quay tiếp", true, None::<&str>)?;
             let show_i    = MenuItem::with_id(app, "show",    "Mở cửa sổ",     true, None::<&str>)?;
             let quit_i    = MenuItem::with_id(app, "quit",    "Thoát",          true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&capture_i, &region_i, &record_i, &show_i, &quit_i])?;
+            let menu = Menu::with_items(app, &[&capture_i, &region_i, &record_i, &pause_i, &show_i, &quit_i])?;
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -132,6 +143,7 @@ pub fn run() {
                     "capture" => trigger_capture(app),
                     "region"  => trigger_region_capture(app),
                     "record"  => record::toggle_recording(app),
+                    "pause"   => record::toggle_pause(app),
                     "show" => {
                         if let Some(win) = app.get_webview_window("main") {
                             let _ = win.show();

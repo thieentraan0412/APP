@@ -201,6 +201,13 @@ kbd {
   border-color: #fcd34d;
 }
 
+/* Đang tạm dừng: màu xám trung tính để phân biệt rõ với lúc đang quay (đỏ) */
+.rec-banner.paused {
+  background: #f1f5f9;
+  color: #475569;
+  border-color: #cbd5e1;
+}
+
 /* ----- Cài đặt ----- */
 .settings {
   max-width: 540px;

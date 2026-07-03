@@ -30,7 +30,7 @@ import "./App.css";
 
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage";
 
-const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3" };
+const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3", pause: "Control+Shift+H" };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
 
 const SidebarS = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -137,6 +137,7 @@ function App() {
   const [image, setImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
+  const [recordPaused, setRecordPaused] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
   const [ffmpegDl, setFfmpegDl] = useState<number | null>(null); // null=không tải, -1=không rõ %, 0..100=phần trăm
@@ -255,14 +256,19 @@ function App() {
         setEditTitle("");
         setImage(e.payload);
         setScreen("editor");
+        // Tự động dò QR trên ảnh vừa chụp: có QR thì hiện modal, ảnh thường thì im lặng.
+        decodeQr(e.payload);
       }),
       listen("region-cancelled", () => { qrModeRef.current = false; }),
       listen<string>("capture-error", (e) => setError(e.payload)),
-      listen("recording-started", () => { setRecording(true); }),
-      listen("recording-stopped", () => { setRecording(false); }),
+      listen("recording-started", () => { setRecording(true); setRecordPaused(false); }),
+      listen("recording-stopped", () => { setRecording(false); setRecordPaused(false); }),
+      listen("recording-paused", () => { setRecordPaused(true); }),
+      listen("recording-resumed", () => { setRecordPaused(false); }),
       listen<string>("video-ready", (e) => videoReadyHandlerRef.current(e.payload)),
       listen<string>("video-error", (e) => {
         setRecording(false);
+        setRecordPaused(false);
         setFfmpegDl(null);
         setScreen("result");
         setUploading(false);
@@ -285,7 +291,7 @@ function App() {
       const saved = localStorage.getItem("shortcuts");
       const cfg = { ...DEFAULT_SHORTCUTS, ...(saved ? JSON.parse(saved) : {}) };
       setShortcuts(cfg);
-      invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region }).catch(() => {});
+      invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region, pause: cfg.pause }).catch(() => {});
     } catch {}
     openLibrary();
     loadUsageStats(true); // load thầm lặng để hiện badge cảnh báo ngay từ đầu
@@ -327,9 +333,10 @@ function App() {
       setRecordSeconds(0);
       return;
     }
+    if (recordPaused) return; // đang tạm dừng: giữ nguyên số giây, ngừng đếm
     const t = window.setInterval(() => setRecordSeconds((s) => s + 1), 1000);
     return () => window.clearInterval(t);
-  }, [recording]);
+  }, [recording, recordPaused]);
 
   function showToast(msg: string) {
     setToast(msg);
@@ -422,6 +429,8 @@ function App() {
   }
 
   function decodeQr(dataUrl: string) {
+    // Xoá kết quả QR cũ trước: tránh modal của lần quét trước còn sót lại khi ảnh mới không có QR.
+    setQrResult(null);
     const img = new Image();
     img.onload = () => {
       try {
@@ -683,10 +692,10 @@ function App() {
     }
   }
 
-  async function onSaveShortcuts(capture: string, record: string, region: string) {
+  async function onSaveShortcuts(capture: string, record: string, region: string, pause: string) {
     try {
-      await invoke("set_shortcuts", { capture, record, region });
-      const cfg = { capture, record, region };
+      await invoke("set_shortcuts", { capture, record, region, pause });
+      const cfg = { capture, record, region, pause };
       setShortcuts(cfg);
       localStorage.setItem("shortcuts", JSON.stringify(cfg));
       showToast("Đã lưu phím tắt");
@@ -829,6 +838,7 @@ function App() {
     return (
       <>
         <EditorScreen
+          key={editId ?? image ?? "editor"}
           imageDataUrl={image}
           initialAnnotations={initialAnnotations}
           initialTitle={editTitle}
@@ -889,9 +899,13 @@ function App() {
           {screen === "library" && (
             <>
               {recording && (
-                <div className={"rec-banner" + (recordSeconds >= VIDEO_WARN_SECONDS ? " warn" : "")}>
-                  ● Đang quay {fmtTime(recordSeconds)} — nhấn <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng
-                  {recordSeconds >= VIDEO_WARN_SECONDS && " ⚠️ video đã khá dài, cân nhắc dừng"}
+                <div className={"rec-banner" + (recordPaused ? " paused" : "") + (recordSeconds >= VIDEO_WARN_SECONDS ? " warn" : "")}>
+                  {recordPaused ? (
+                    <>⏸ Đã tạm dừng {fmtTime(recordSeconds)} — nhấn <kbd>{prettyKey(shortcuts.pause)}</kbd> để quay tiếp · <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng</>
+                  ) : (
+                    <>● Đang quay {fmtTime(recordSeconds)} — nhấn <kbd>{prettyKey(shortcuts.pause)}</kbd> để tạm dừng · <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng</>
+                  )}
+                  {!recordPaused && recordSeconds >= VIDEO_WARN_SECONDS && " ⚠️ video đã khá dài, cân nhắc dừng"}
                 </div>
               )}
               {error && <p className="error" style={{ margin: "0.5rem 1.5rem 0" }}>Lỗi: {error}</p>}
@@ -921,6 +935,7 @@ function App() {
               capture={shortcuts.capture}
               record={shortcuts.record}
               region={shortcuts.region}
+              pause={shortcuts.pause}
               onSave={onSaveShortcuts}
               onBack={backHome}
               onCheckUpdate={manualCheckUpdate}
