@@ -43,6 +43,15 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const appliedInit = useRef(false);
   const clipboard = useRef<ClipItem | null>(null);
 
+  // ── Undo/Redo ──────────────────────────────────────────────
+  // Lưu lịch sử "ảnh chụp" trạng thái annotate. Ghi theo debounce 300ms để gộp
+  // các thay đổi liên tục (kéo vẽ khung/mũi tên, kéo thả) thành 1 bước undo.
+  type Snapshot = { boxes: Box[]; arrows: Arrow[]; steps: StepMarker[]; notes: Note[] };
+  const history = useRef<Snapshot[]>([]);
+  const histIndex = useRef(-1);
+  const skipRecord = useRef(false); // true = trạng thái đổi do undo/redo → không ghi history
+  const pendingRec = useRef<number | null>(null);
+
   type QrState = { found: true; text: string; isUrl: boolean } | { found: false } | null;
   const [qrResult, setQrResult] = useState<QrState>(null);
 
@@ -111,6 +120,17 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         handleSave();
         return;
       }
+      // Hoàn tác / Làm lại (e.code không lệ thuộc layout bàn phím)
+      if ((e.ctrlKey || e.metaKey) && (e.code === "KeyZ" || e.key.toLowerCase() === "z")) {
+        e.preventDefault();
+        if (e.shiftKey) redo(); else undo();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.code === "KeyY" || e.key.toLowerCase() === "y")) {
+        e.preventDefault();
+        redo();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key === "c" && !selectedId) {
         e.preventDefault();
         copyImage();
@@ -166,13 +186,20 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // Nạp annotate cũ khi mở để SỬA (toạ độ gốc → toạ độ hiển thị)
   useEffect(() => {
     if (!img || appliedInit.current) return;
+    let base: Snapshot = { boxes: [], arrows: [], steps: [], notes: [] };
     if (initialAnnotations) {
       const s = fit.scale;
-      setBoxes(initialAnnotations.boxes.map((b) => ({ ...b, x: b.x * s, y: b.y * s, w: b.w * s, h: b.h * s })));
-      setArrows((initialAnnotations.arrows ?? []).map((a) => ({ ...a, x1: a.x1 * s, y1: a.y1 * s, x2: a.x2 * s, y2: a.y2 * s })));
-      setSteps((initialAnnotations.steps ?? []).map((st) => ({ ...st, x: st.x * s, y: st.y * s })));
-      setNotes(initialAnnotations.notes.map((n) => ({ ...n, x: n.x * s, y: n.y * s })));
+      const b = initialAnnotations.boxes.map((x) => ({ ...x, x: x.x * s, y: x.y * s, w: x.w * s, h: x.h * s }));
+      const a = (initialAnnotations.arrows ?? []).map((x) => ({ ...x, x1: x.x1 * s, y1: x.y1 * s, x2: x.x2 * s, y2: x.y2 * s }));
+      const st = (initialAnnotations.steps ?? []).map((x) => ({ ...x, x: x.x * s, y: x.y * s }));
+      const n = initialAnnotations.notes.map((x) => ({ ...x, x: x.x * s, y: x.y * s }));
+      setBoxes(b); setArrows(a); setSteps(st); setNotes(n);
+      base = { boxes: b, arrows: a, steps: st, notes: n };
+      skipRecord.current = true; // nạp ban đầu không tính là 1 bước undo
     }
+    // Seed baseline: undo sẽ dừng ở trạng thái mở ban đầu, không lùi quá
+    history.current = [cloneSnap(base)];
+    histIndex.current = 0;
     appliedInit.current = true;
   }, [img, fit.scale, initialAnnotations]);
 
@@ -183,6 +210,56 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setSteps((prev) => prev.filter((st) => st.id !== selectedId));
     setNotes((prev) => prev.filter((n) => n.id !== selectedId));
     setSelectedId(null);
+  }
+
+  // ── Undo/Redo helpers ──────────────────────────────────────
+  function cloneSnap(s: Snapshot): Snapshot {
+    return {
+      boxes: s.boxes.map((x) => ({ ...x })),
+      arrows: s.arrows.map((x) => ({ ...x })),
+      steps: s.steps.map((x) => ({ ...x })),
+      notes: s.notes.map((x) => ({ ...x })),
+    };
+  }
+  function snapKey(s: Snapshot): string {
+    return JSON.stringify([s.boxes, s.arrows, s.steps, s.notes]);
+  }
+  // Ghi ngay trạng thái hiện tại vào history (bỏ qua nếu trùng bước trước đó)
+  function recordNow() {
+    const snap = cloneSnap({ boxes, arrows, steps, notes });
+    const cur = history.current[histIndex.current];
+    if (cur && snapKey(cur) === snapKey(snap)) return;
+    history.current = history.current.slice(0, histIndex.current + 1);
+    history.current.push(snap);
+    histIndex.current = history.current.length - 1;
+  }
+  // Ghi ngay nếu còn bản chờ debounce — gọi trước undo/redo để không sót thao tác vừa làm
+  function flushRecord() {
+    if (pendingRec.current != null) {
+      window.clearTimeout(pendingRec.current);
+      pendingRec.current = null;
+      recordNow();
+    }
+  }
+  function restoreSnap(snap: Snapshot) {
+    skipRecord.current = true; // các set* dưới đây là khôi phục, không tính thành bước mới
+    setBoxes(snap.boxes.map((x) => ({ ...x })));
+    setArrows(snap.arrows.map((x) => ({ ...x })));
+    setSteps(snap.steps.map((x) => ({ ...x })));
+    setNotes(snap.notes.map((x) => ({ ...x })));
+    setSelectedId(null);
+  }
+  function undo() {
+    flushRecord();
+    if (histIndex.current <= 0) return;
+    histIndex.current -= 1;
+    restoreSnap(history.current[histIndex.current]);
+  }
+  function redo() {
+    flushRecord();
+    if (histIndex.current >= history.current.length - 1) return;
+    histIndex.current += 1;
+    restoreSnap(history.current[histIndex.current]);
   }
 
   // Xuất ảnh đã gộp (nền + khung + mũi tên + bước + ghi chú) ra PNG.
@@ -240,6 +317,21 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [img, boxes, arrows, steps, notes, fit.scale]);
+
+  // Ghi history mỗi khi annotate đổi (debounce 300ms → gộp thao tác kéo/vẽ thành 1 bước)
+  useEffect(() => {
+    if (!img) return;
+    if (skipRecord.current) { skipRecord.current = false; return; }
+    if (pendingRec.current != null) window.clearTimeout(pendingRec.current);
+    pendingRec.current = window.setTimeout(() => {
+      pendingRec.current = null;
+      recordNow();
+    }, 300);
+    return () => {
+      if (pendingRec.current != null) { window.clearTimeout(pendingRec.current); pendingRec.current = null; }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [img, boxes, arrows, steps, notes]);
 
   async function handleSave() {
     if (!stageRef.current || !img) return;

@@ -186,6 +186,13 @@ function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // Cắt video (trim) trước khi lưu
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [trimStart, setTrimStart] = useState(0);
+  const [trimEnd, setTrimEnd] = useState(0);
+  const [trimming, setTrimming] = useState(false);
+  const videoElRef = useRef<HTMLVideoElement>(null);
+
   // Thư viện
   const [libItems, setLibItems] = useState<LibraryItem[]>([]);
   const [libLoading, setLibLoading] = useState(false);
@@ -313,10 +320,14 @@ function App() {
   useEffect(() => {
     if (screen !== "result" || !videoPendingReady) return;
     const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); saveVideoRef.current(); }
+      // e.code="KeyS" không lệ thuộc layout; capture phase để tới trước mọi element con
+      if ((e.ctrlKey || e.metaKey) && (e.code === "KeyS" || e.key.toLowerCase() === "s")) {
+        e.preventDefault();
+        saveVideoRef.current();
+      }
     };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    window.addEventListener("keydown", handler, { capture: true });
+    return () => window.removeEventListener("keydown", handler, { capture: true });
   }, [screen, videoPendingReady]);
 
   // ESC trên màn hình result → quay về trang chủ
@@ -404,6 +415,10 @@ function App() {
     setVideoTitle("");
     setTitleSaved(false);
     setVideoPendingReady(false);
+    setVideoDuration(0);
+    setTrimStart(0);
+    setTrimEnd(0);
+    setTrimming(false);
   }
 
   function manualRegionCapture() {
@@ -530,6 +545,31 @@ function App() {
       showToast("Đã lưu vào máy tính");
     } catch (err) {
       showToast("Lưu thất bại: " + String(err));
+    }
+  }
+
+  // Cắt video theo đoạn đã chọn: gọi ffmpeg ở Rust → thay preview + blob pending bằng bản đã cắt.
+  async function trimVideo() {
+    if (!videoPendingRef.current) return;
+    const src = videoPendingRef.current.path;
+    const start = Math.max(0, trimStart);
+    const end = Math.min(videoDuration, trimEnd);
+    if (end - start < 0.2) { showToast("Đoạn chọn quá ngắn"); return; }
+    setTrimming(true);
+    try {
+      const newPath = await invoke<string>("trim_video", { src, start, end });
+      const bytes = await readFile(newPath);
+      const blob = new Blob([bytes], { type: "video/mp4" });
+      invoke("remove_temp", { path: src }).catch(() => {}); // xoá file gốc chưa cắt
+      if (preview) URL.revokeObjectURL(preview);
+      setPreview(URL.createObjectURL(blob));
+      videoPendingRef.current = { blob, path: newPath };
+      // videoDuration + trimStart/End sẽ tự đặt lại qua onLoadedMetadata của <video>
+      showToast("Đã cắt video");
+    } catch (err) {
+      showToast("Cắt video lỗi: " + String(err));
+    } finally {
+      setTrimming(false);
     }
   }
 
@@ -979,6 +1019,53 @@ function App() {
           </div>
         )}
 
+        {videoPendingReady && !uploading && videoDuration > 0 && (() => {
+          const dur = videoDuration || 1;
+          const startPct = Math.max(0, Math.min(100, (trimStart / dur) * 100));
+          const endPct = Math.max(0, Math.min(100, (trimEnd / dur) * 100));
+          const isFull = trimStart <= 0.05 && trimEnd >= videoDuration - 0.05;
+          return (
+            <div className="trimmer">
+              <div className="trimmer-head">
+                <span className="trim-chip">▶ {fmtTime(Math.floor(trimStart))}</span>
+                <span className="trim-chip end">⏹ {fmtTime(Math.floor(trimEnd))}</span>
+                <span className="trim-keep">✂ Giữ {fmtTime(Math.floor(trimEnd - trimStart))} / {fmtTime(Math.floor(videoDuration))}</span>
+                <span className="trim-spacer" />
+                <button
+                  className="primary trim-cut"
+                  onClick={trimVideo}
+                  disabled={trimming || isFull}
+                  title={isFull ? "Kéo hai đầu để chọn đoạn cần giữ" : "Cắt video giữ đúng đoạn đã chọn"}
+                >
+                  {trimming ? "Đang cắt…" : "✂ Cắt video"}
+                </button>
+              </div>
+              <div className="trim-track-wrap">
+                <div className="trim-rail" />
+                <div className="trim-sel" style={{ left: `${startPct}%`, width: `${Math.max(0, endPct - startPct)}%` }} />
+                <input
+                  type="range" min={0} max={videoDuration} step={0.05} value={trimStart}
+                  aria-label="Điểm bắt đầu"
+                  onChange={(e) => {
+                    const v = Math.max(0, Math.min(parseFloat(e.target.value), trimEnd - 0.2));
+                    setTrimStart(v);
+                    if (videoElRef.current) videoElRef.current.currentTime = v;
+                  }}
+                />
+                <input
+                  type="range" min={0} max={videoDuration} step={0.05} value={trimEnd}
+                  aria-label="Điểm kết thúc"
+                  onChange={(e) => {
+                    const v = Math.min(videoDuration, Math.max(parseFloat(e.target.value), trimStart + 0.2));
+                    setTrimEnd(v);
+                    if (videoElRef.current) videoElRef.current.currentTime = v;
+                  }}
+                />
+              </div>
+            </div>
+          );
+        })()}
+
         {link && (
           <div className="linkbar">
             <input
@@ -1030,7 +1117,17 @@ function App() {
         {preview && (
           <div className="preview">
             {previewType === "video" ? (
-              <video src={preview} controls autoPlay muted />
+              <video
+                ref={videoElRef}
+                src={preview}
+                controls
+                autoPlay
+                muted
+                onLoadedMetadata={(e) => {
+                  const d = e.currentTarget.duration;
+                  if (isFinite(d) && d > 0) { setVideoDuration(d); setTrimStart(0); setTrimEnd(d); }
+                }}
+              />
             ) : (
               <img src={preview} alt="Ảnh đã gộp khung + note" />
             )}

@@ -82,6 +82,14 @@ fn save_video_to_path(src: String, dst: String) -> Result<(), String> {
     std::fs::copy(&src, &dst).map(|_| ()).map_err(|e| e.to_string())
 }
 
+// Cắt video (async + spawn_blocking để không treo UI khi ffmpeg chạy).
+#[tauri::command]
+async fn trim_video(app: AppHandle, src: String, start: f64, end: f64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || ffmpeg::trim(&app, &src, start, end))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn toggle_recording_cmd(app: AppHandle) {
     record::toggle_recording(&app);
@@ -171,6 +179,7 @@ pub fn run() {
             set_shortcuts,
             remove_temp,
             save_video_to_path,
+            trim_video,
             toggle_recording_cmd
         ])
         .run(tauri::generate_context!())

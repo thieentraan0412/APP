@@ -2,7 +2,13 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter, Manager};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // Nơi tải ffmpeg.exe (đặt sẵn trong một GitHub Release của repo).
 const FFMPEG_URL: &str =
@@ -62,4 +68,54 @@ pub fn ensure_ffmpeg(app: &AppHandle) -> Result<PathBuf, String> {
     fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     let _ = app.emit("ffmpeg-ready", ());
     Ok(path)
+}
+
+// Cắt video từ `start` đến `end` (giây) → xuất mp4 tạm mới, trả về đường dẫn.
+// Dùng input-seek (`-ss` trước `-i`) + `-t` (thời lượng) rồi re-encode khớp cấu hình quay
+// để cắt chính xác theo khung hình. Tên output kèm timestamp → không đè lên file nguồn
+// (cho phép cắt nhiều lần liên tiếp).
+pub fn trim(app: &AppHandle, src: &str, start: f64, end: f64) -> Result<String, String> {
+    let dur = end - start;
+    if dur < 0.1 {
+        return Err("Đoạn chọn quá ngắn".into());
+    }
+    let ffmpeg = ensure_ffmpeg(app)?;
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let out = std::env::temp_dir().join(format!("capture_rec_trim_{stamp}.mp4"));
+    let out_str = out.to_string_lossy().to_string();
+
+    let ss = format!("{:.3}", start.max(0.0));
+    let t = format!("{dur:.3}");
+
+    let mut command = Command::new(&ffmpeg);
+    command
+        .args([
+            "-y",
+            "-ss", ss.as_str(),
+            "-i", src,
+            "-t", t.as_str(),
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-an", // video quay không có tiếng
+            out_str.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let status = command.status().map_err(|e| e.to_string())?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&out);
+        return Err("Cắt video thất bại".into());
+    }
+    Ok(out_str)
 }
