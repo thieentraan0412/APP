@@ -4,6 +4,7 @@ use image::{
     codecs::png::{CompressionType, FilterType, PngEncoder},
     ExtendedColorType, ImageEncoder,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 use xcap::Monitor;
@@ -12,6 +13,9 @@ pub struct RegionState {
     pub raw: Mutex<Option<Vec<u8>>>,
     pub w:   Mutex<u32>,
     pub h:   Mutex<u32>,
+    // Đang trong quá trình chụp vùng (overlay mở). Dùng để chặn chụp full màn hình
+    // xen ngang làm tráo kết quả (H2).
+    pub active: AtomicBool,
 }
 
 impl Default for RegionState {
@@ -20,8 +24,14 @@ impl Default for RegionState {
             raw: Mutex::new(None),
             w:   Mutex::new(0),
             h:   Mutex::new(0),
+            active: AtomicBool::new(false),
         }
     }
+}
+
+// Có đang chụp vùng không (để lib.rs chặn chụp full xen ngang).
+pub fn region_active(app: &AppHandle) -> bool {
+    app.state::<RegionState>().active.load(Ordering::SeqCst)
 }
 
 fn capture_primary_raw() -> Result<(Vec<u8>, u32, u32), String> {
@@ -75,12 +85,14 @@ pub fn capture_screen() -> Result<String, String> {
 // Ẩn main window, chờ 150ms để nó biến khỏi màn hình, chụp full, lưu vào RegionState, mở overlay.
 pub fn begin_region_capture(app: AppHandle) {
     std::thread::spawn(move || {
+        let state = app.state::<RegionState>();
+        // Đánh dấu đang chụp vùng NGAY từ đầu để chặn chụp full xen ngang (H2).
+        state.active.store(true, Ordering::SeqCst);
         if let Some(main) = app.get_webview_window("main") {
             let _ = main.hide();
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
 
-        let state = app.state::<RegionState>();
         match capture_primary_raw() {
             Ok((raw, w, h)) => {
                 *state.raw.lock().unwrap() = Some(raw);
@@ -92,6 +104,8 @@ pub fn begin_region_capture(app: AppHandle) {
                 }
             }
             Err(e) => {
+                // Chụp lỗi → overlay không mở → hết trạng thái chụp vùng.
+                state.active.store(false, Ordering::SeqCst);
                 if let Some(main) = app.get_webview_window("main") {
                     let _ = main.show();
                 }
@@ -116,6 +130,7 @@ pub fn confirm_region_capture(
     w: u32,
     h: u32,
 ) -> Result<(), String> {
+    state.active.store(false, Ordering::SeqCst); // hết chụp vùng (H2)
     if let Some(sel) = app.get_webview_window("region_selector") {
         let _ = sel.hide();
     }
@@ -124,35 +139,50 @@ pub fn confirm_region_capture(
         let _ = main.set_focus();
     }
 
-    let guard = state.raw.lock().unwrap();
-    let raw = guard.as_ref().ok_or("Không có ảnh trong bộ nhớ")?;
-    let full_w = *state.w.lock().unwrap();
-    let full_h = *state.h.lock().unwrap();
+    // Crop trong closure để mọi lỗi đều báo về main qua "capture-error" (H3): trước đây
+    // lỗi crop chỉ trả Err (RegionSelector không .catch) → overlay đã đóng, main hiện lên
+    // mà không có ảnh và không báo gì → thất bại im lặng.
+    let result: Result<String, String> = (|| {
+        let guard = state.raw.lock().unwrap();
+        let raw = guard.as_ref().ok_or("Không có ảnh trong bộ nhớ")?;
+        let full_w = *state.w.lock().unwrap();
+        let full_h = *state.h.lock().unwrap();
 
-    // Clamp tránh out-of-bounds
-    let x2 = (x + w).min(full_w);
-    let y2 = (y + h).min(full_h);
-    let cw = x2.saturating_sub(x);
-    let ch = y2.saturating_sub(y);
-    if cw == 0 || ch == 0 {
-        return Err("Vùng chọn quá nhỏ".into());
+        // Clamp tránh out-of-bounds
+        let x2 = (x + w).min(full_w);
+        let y2 = (y + h).min(full_h);
+        let cw = x2.saturating_sub(x);
+        let ch = y2.saturating_sub(y);
+        if cw == 0 || ch == 0 {
+            return Err("Vùng chọn quá nhỏ".into());
+        }
+
+        let stride = full_w as usize * 4;
+        let mut cropped = Vec::with_capacity(cw as usize * ch as usize * 4);
+        for row in y..y2 {
+            let start = row as usize * stride + x as usize * 4;
+            cropped.extend_from_slice(&raw[start..start + cw as usize * 4]);
+        }
+
+        copy_rgba_to_clipboard(cropped.clone(), cw, ch);
+        rgba_to_data_url(&cropped, cw, ch)
+    })();
+
+    match result {
+        Ok(data_url) => {
+            let _ = app.emit("image-captured", data_url);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("capture-error", e.clone());
+            Err(e)
+        }
     }
-
-    let stride = full_w as usize * 4;
-    let mut cropped = Vec::with_capacity(cw as usize * ch as usize * 4);
-    for row in y..y2 {
-        let start = row as usize * stride + x as usize * 4;
-        cropped.extend_from_slice(&raw[start..start + cw as usize * 4]);
-    }
-
-    copy_rgba_to_clipboard(cropped.clone(), cw, ch);
-    let data_url = rgba_to_data_url(&cropped, cw, ch)?;
-    let _ = app.emit("image-captured", data_url);
-    Ok(())
 }
 
 #[tauri::command]
 pub fn cancel_region_capture(app: AppHandle) {
+    app.state::<RegionState>().active.store(false, Ordering::SeqCst); // hết chụp vùng (H2)
     if let Some(sel) = app.get_webview_window("region_selector") {
         let _ = sel.hide();
     }

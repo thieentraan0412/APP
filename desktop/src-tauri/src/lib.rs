@@ -26,6 +26,11 @@ const DEFAULT_REGION:  &str = "CommandOrControl+Shift+3";
 const DEFAULT_PAUSE:   &str = "CommandOrControl+Shift+H";
 
 fn trigger_capture(app: &AppHandle) {
+    // H2: đang chụp vùng (overlay mở) → bỏ qua chụp full để không tráo kết quả
+    // giữa ảnh full và ảnh vùng / dò QR.
+    if capture::region_active(app) {
+        return;
+    }
     match capture::capture_primary_png_base64() {
         Ok(data_url) => {
             let _ = app.emit("image-captured", data_url);
@@ -53,10 +58,11 @@ fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str, p
 
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
-    gs.register(cap.clone()).map_err(|e| e.to_string())?;
-    gs.register(rec.clone()).map_err(|e| e.to_string())?;
-    gs.register(reg.clone()).map_err(|e| e.to_string())?;
-    // Không để phím tạm dừng làm hỏng cả cấu hình nếu lỡ trùng phím khác.
+    // Đăng ký từng phím ĐỘC LẬP: một phím lỗi (vd trùng hotkey của Windows) KHÔNG được
+    // làm hỏng các phím còn lại (H8). Luôn cập nhật state khớp với phím đã đăng ký.
+    let _ = gs.register(cap.clone());
+    let _ = gs.register(rec.clone());
+    let _ = gs.register(reg.clone());
     let _ = gs.register(pause.clone());
 
     let st = app.state::<ShortcutCfg>();
@@ -97,7 +103,19 @@ fn toggle_recording_cmd(app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Tắt QUIC/HTTP3 cho webview được đặt qua `additionalBrowserArgs` của cửa sổ main trong
+    // tauri.conf.json (env var WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS bị wry đè nên vô tác dụng).
     tauri::Builder::default()
+        // PHẢI là plugin đầu tiên. Chặn mở app 2 lần: instance thứ 2 sẽ đưa cửa sổ chính
+        // của instance đang chạy lên rồi tự thoát — tránh 2 instance tranh nhau global hotkey
+        // (khiến phím tắt Alt+* đăng ký thất bại → chụp vùng/quay/chụp đều chết).
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_shell::init())

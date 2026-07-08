@@ -124,6 +124,9 @@ function fmtTime(sec: number): string {
 // localStorage và gắn ?cb=<phiên bản> vào URL để buộc tải lại đúng ảnh mới.
 // (Chỉ ảnh từng sửa mới tải lại; ảnh khác vẫn dùng cache → không tốn thêm ops.)
 const IMG_VER_KEY = "img-versions";
+const LIB_CACHE_KEY = "lib-cache"; // danh sách thư viện gần nhất, để hiện khi mạng chập chờn
+// Bump khi cần buộc nạp lại TẤT CẢ thumbnail ảnh (vd worker đổi Content-Type png→webp).
+const IMG_FMT = 2;
 function loadImgVersions(): Record<string, number> {
   try { return JSON.parse(localStorage.getItem(IMG_VER_KEY) || "{}"); } catch { return {}; }
 }
@@ -201,6 +204,7 @@ function App() {
 
   const screenRef = useRef<Screen>("library");
   useEffect(() => { screenRef.current = screen; }, [screen]);
+  const libRetry = useRef(0); // đếm lần tự thử lại khi tải thư viện thất bại (mạng chập chờn)
 
   // Luôn giữ refs trỏ đến handler hiện tại — tránh stale closure trong useEffect
   useEffect(() => {
@@ -263,11 +267,13 @@ function App() {
         setEditTitle("");
         setImage(e.payload);
         setScreen("editor");
-        // Tự động dò QR trên ảnh vừa chụp: có QR thì hiện modal, ảnh thường thì im lặng.
-        decodeQr(e.payload);
+        // KHÔNG tự dò QR trên ảnh chụp thường: modal "Mã QR" chỉ hiện khi người dùng
+        // chủ động dùng chức năng Quét QR (qrModeRef). Tránh popup QR khi chụp ảnh bình thường.
       }),
       listen("region-cancelled", () => { qrModeRef.current = false; }),
-      listen<string>("capture-error", (e) => setError(e.payload)),
+      // Chụp lỗi (kể cả khi đang ở chế độ Quét QR) → reset qrModeRef, nếu không lần
+      // chụp/phím tắt kế tiếp sẽ bị "nuốt" thành dò QR (H1).
+      listen<string>("capture-error", (e) => { qrModeRef.current = false; setError(e.payload); }),
       listen("recording-started", () => { setRecording(true); setRecordPaused(false); }),
       listen("recording-stopped", () => { setRecording(false); setRecordPaused(false); }),
       listen("recording-paused", () => { setRecordPaused(true); }),
@@ -371,12 +377,18 @@ function App() {
       return next;
     });
   }
-  // Gắn ?cb cho ảnh từng sửa để hiện đúng ảnh mới (video không cần)
-  const displayItems = libItems.map((it) =>
-    it.type === "image" && imgVersions[it.id]
-      ? { ...it, fileUrl: busted(it.fileUrl, imgVersions[it.id]) }
-      : it
-  );
+  // Gắn tham số cho URL ảnh (video không cần):
+  // - ?cb : bust cache khi sửa lại ảnh (per-item).
+  // - ?fmt: bust MỘT LẦN cho mọi ảnh khi worker đổi Content-Type png→webp. Trước đây
+  //   webview cache phản hồi cũ (image/png nhưng byte WebP, Cache-Control 1 năm) nên
+  //   thumbnail vỡ; đổi URL → nạp lại → nhận image/webp đúng → hiện được. Tăng IMG_FMT
+  //   nếu sau này cần buộc nạp lại toàn bộ ảnh.
+  const displayItems = libItems.map((it) => {
+    if (it.type !== "image") return it;
+    let url = busted(it.fileUrl, imgVersions[it.id]);
+    url += `${url.includes("?") ? "&" : "?"}fmt=${IMG_FMT}`;
+    return { ...it, fileUrl: url };
+  });
 
   // Tải & cài bản cập nhật (app sẽ tự khởi động lại khi xong)
   async function runUpdate() {
@@ -459,6 +471,9 @@ function App() {
         const code = jsQR(imageData.data, img.width, img.height);
         if (code) {
           setQrResult({ found: true, text: code.data, isUrl: isHttpUrl(code.data) });
+        } else {
+          // Chỉ được gọi khi người dùng chủ động Quét QR → báo rõ không tìm thấy.
+          setQrResult({ found: false });
         }
       } catch {}
     };
@@ -607,9 +622,26 @@ function App() {
     setLibLoading(true);
     setLibError(null);
     try {
-      setLibItems(await listItems());
+      const items = await listItems();
+      setLibItems(items);
+      libRetry.current = 0;
+      try { localStorage.setItem(LIB_CACHE_KEY, JSON.stringify(items)); } catch {}
     } catch (err) {
-      setLibError(String(err));
+      // Không tải được (mạng/webview chập chờn lúc khởi động): hiện danh sách đã lưu gần
+      // nhất để vẫn dùng được, thay vì trắng trơn.
+      let cached: LibraryItem[] | null = null;
+      try { cached = JSON.parse(localStorage.getItem(LIB_CACHE_KEY) || "null"); } catch {}
+      if (cached && cached.length) {
+        setLibItems(cached);
+        setLibError('Đang hiện danh sách đã lưu (chưa kết nối được máy chủ). Đang thử lại…');
+      } else {
+        setLibError(String(err));
+      }
+      // Tự động thử lại (backoff tăng dần) — không bắt người dùng phải bấm Làm mới liên tục.
+      if (libRetry.current < 5 && screenRef.current === "library") {
+        libRetry.current += 1;
+        window.setTimeout(() => { if (screenRef.current === "library") openLibrary(); }, 2500 * libRetry.current);
+      }
     } finally {
       setLibLoading(false);
     }
@@ -733,6 +765,17 @@ function App() {
   }
 
   async function onSaveShortcuts(capture: string, record: string, region: string, pause: string) {
+    // H8: 4 phím tắt phải KHÁC nhau. Nếu trùng, khi Rust đăng ký sẽ lỗi giữa chừng
+    // (sau khi đã gỡ hết phím cũ) → mọi phím tắt toàn cục chết tới khi khởi động lại.
+    const entries: [string, string][] = [["Chụp", capture], ["Quay", record], ["Chụp vùng", region], ["Tạm dừng", pause]];
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        if (entries[i][1] === entries[j][1]) {
+          showToast(`Phím tắt trùng: "${entries[i][0]}" và "${entries[j][0]}" cùng là ${prettyKey(entries[i][1])}`);
+          return;
+        }
+      }
+    }
     try {
       await invoke("set_shortcuts", { capture, record, region, pause });
       const cfg = { capture, record, region, pause };

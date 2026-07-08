@@ -23,6 +23,9 @@ pub struct RecState {
 struct Session {
     recording: bool,
     paused: bool,
+    // Đang trong một chuyển trạng thái có spawn/chờ ffmpeg (start/resume/pause). Bật NGAY
+    // trong lock trước khi spawn để bấm phím 2 lần nhanh không sinh tiến trình trùng (H5).
+    busy: bool,
     ffmpeg: Option<PathBuf>,     // đường dẫn ffmpeg.exe (giữ lại để mở đoạn mới nhanh)
     child: Option<Child>,        // tiến trình ffmpeg của đoạn đang quay
     stdin: Option<ChildStdin>,   // stdin để gửi 'q' kết thúc đoạn
@@ -75,7 +78,17 @@ fn spawn_segment(app: &AppHandle, ffmpeg: &PathBuf, out: &PathBuf) -> Result<Chi
 }
 
 pub fn toggle_recording(app: &AppHandle) {
-    let recording = app.state::<RecState>().inner.lock().unwrap().recording;
+    let recording = {
+        let st = app.state::<RecState>();
+        let mut s = st.inner.lock().unwrap();
+        if s.busy {
+            return; // đang khởi động dở → bỏ qua, tránh spawn ffmpeg trùng (H5)
+        }
+        if !s.recording {
+            s.busy = true; // khoá re-entrancy TRƯỚC khi start() spawn ffmpeg
+        }
+        s.recording
+    };
     if recording {
         stop(app);
     } else {
@@ -87,12 +100,14 @@ pub fn toggle_recording(app: &AppHandle) {
 pub fn toggle_pause(app: &AppHandle) {
     let (recording, paused) = {
         let st = app.state::<RecState>();
-        let s = st.inner.lock().unwrap();
+        let mut s = st.inner.lock().unwrap();
+        if s.busy || !s.recording {
+            return; // đang chuyển trạng thái dở hoặc không quay → bỏ qua (H5)
+        }
+        s.busy = true; // khoá trước khi pause/resume spawn/chờ ffmpeg
         (s.recording, s.paused)
     };
-    if !recording {
-        return;
-    }
+    let _ = recording;
     if paused {
         resume(app);
     } else {
@@ -107,6 +122,7 @@ fn start(app: &AppHandle) {
         let ffmpeg = match crate::ffmpeg::ensure_ffmpeg(&app) {
             Ok(p) => p,
             Err(e) => {
+                clear_busy(&app); // mở khoá re-entrancy khi thất bại (H5)
                 let _ = app.emit("video-error", format!("Không chuẩn bị được ffmpeg: {e}"));
                 return;
             }
@@ -125,15 +141,23 @@ fn start(app: &AppHandle) {
                     s.ffmpeg = Some(ffmpeg);
                     s.segments = Vec::new();
                     s.seg_index = 0;
+                    s.busy = false; // khởi động xong
                 }
                 let _ = app.emit("recording-started", ());
                 show_notify(&app);
             }
             Err(last_err) => {
+                clear_busy(&app);
                 let _ = app.emit("video-error", format!("Không quay được: {last_err}"));
             }
         }
     });
+}
+
+// Mở khoá re-entrancy (H5) — dùng khi một chuyển trạng thái spawn/chờ kết thúc.
+fn clear_busy(app: &AppHandle) {
+    let st = app.state::<RecState>();
+    st.inner.lock().unwrap().busy = false;
 }
 
 fn pause(app: &AppHandle) {
@@ -144,6 +168,7 @@ fn pause(app: &AppHandle) {
         let (mut child, stdin, seg_index) = {
             let mut s = st.inner.lock().unwrap();
             if !s.recording || s.paused {
+                s.busy = false; // (H5)
                 return;
             }
             s.paused = true;
@@ -160,6 +185,7 @@ fn pause(app: &AppHandle) {
         {
             let mut s = st.inner.lock().unwrap();
             s.segments.push(seg_path(seg_index));
+            s.busy = false; // tạm dừng xong (H5)
         }
         let _ = app.emit("recording-paused", ());
     });
@@ -170,15 +196,19 @@ fn resume(app: &AppHandle) {
     std::thread::spawn(move || {
         let st = app.state::<RecState>();
         let (ffmpeg, new_index) = {
-            let s = st.inner.lock().unwrap();
+            let mut s = st.inner.lock().unwrap();
             if !s.recording || !s.paused {
+                s.busy = false; // (H5)
                 return;
             }
             (s.ffmpeg.clone(), s.seg_index + 1)
         };
         let ffmpeg = match ffmpeg {
             Some(f) => f,
-            None => return,
+            None => {
+                clear_busy(&app);
+                return;
+            }
         };
         let out = seg_path(new_index);
         match spawn_segment(&app, &ffmpeg, &out) {
@@ -189,10 +219,12 @@ fn resume(app: &AppHandle) {
                     s.child = Some(child);
                     s.seg_index = new_index;
                     s.paused = false;
+                    s.busy = false; // quay tiếp xong (H5)
                 }
                 let _ = app.emit("recording-resumed", ());
             }
             Err(e) => {
+                clear_busy(&app);
                 let _ = app.emit("video-error", format!("Không quay tiếp được: {e}"));
             }
         }
@@ -246,7 +278,15 @@ fn stop(app: &AppHandle) {
             s.paused = false;
         }
 
-        let final_out = std::env::temp_dir().join("capture_rec.mp4");
+        // Tên duy nhất mỗi lần quay (theo timestamp) — tránh trùng với file của lần
+        // quay trước đang được màn hình kết quả giữ. Nếu dùng chung 1 tên cố định,
+        // khi quay lần 2 frontend sẽ remove_temp(path cũ) trùng path mới → xoá nhầm
+        // file vừa quay → lỗi "không đọc được video".
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let final_out = std::env::temp_dir().join(format!("capture_rec_{stamp}.mp4"));
         match finalize(&app, ffmpeg.as_ref(), &segments, &final_out) {
             Ok(path) => {
                 let _ = app.emit("video-ready", path.to_string_lossy().to_string());

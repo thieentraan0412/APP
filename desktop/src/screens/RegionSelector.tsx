@@ -94,10 +94,11 @@ export function RegionSelector() {
     const h = Math.round(Math.abs(e.clientY - y0) * dpr);
 
     if (w < 10 || h < 10) {
-      await invoke("cancel_region_capture");
+      await invoke("cancel_region_capture").catch(() => {});
       return;
     }
-    await invoke("confirm_region_capture", { x, y, w, h });
+    // Lỗi crop được Rust báo về main qua "capture-error" (H3) → chỉ cần nuốt rejection ở đây.
+    await invoke("confirm_region_capture", { x, y, w, h }).catch(() => {});
   }
 
   return (

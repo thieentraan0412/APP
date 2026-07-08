@@ -134,18 +134,20 @@ export default {
         if (!file) return json({ error: "Thiếu file" }, 400);
 
         const id = makeId();
-        const ext = type === "video" ? "mp4" : "png";
-        const mime = type === "video" ? "video/mp4" : "image/png";
+        // Ảnh app xuất ra luôn là WebP (flattenStage) → lưu đúng mime/ext để link chia sẻ
+        // hiển thị được trên web (trước đây gắn nhãn image/png cho byte WebP → ảnh vỡ).
+        const ext = type === "video" ? "mp4" : "webp";
+        const mime = type === "video" ? "video/mp4" : "image/webp";
         const key = `items/${id}.${ext}`;
 
         await env.BUCKET.put(key, file.stream(), { httpMetadata: { contentType: mime } });
 
-        // Lưu thêm ảnh gốc (để sửa lại annotate) nếu có
+        // Lưu thêm ảnh gốc (để sửa lại annotate) nếu có — cũng là WebP.
         let origKey: string | null = null;
         if (type === "image" && original) {
-          origKey = `items/${id}_orig.png`;
+          origKey = `items/${id}_orig.webp`;
           await env.BUCKET.put(origKey, original.stream(), {
-            httpMetadata: { contentType: "image/png" },
+            httpMetadata: { contentType: "image/webp" },
           });
         }
 
@@ -248,7 +250,10 @@ export default {
         .bind(id)
         .first<Pick<ItemRow, "r2_key" | "mime">>();
       if (!row) return new Response("Not found", { status: 404, headers: CORS });
-      return serveR2(env, row.r2_key, row.mime, req);
+      // File ảnh trong hệ thống LUÔN là WebP → ép image/webp kể cả item cũ lưu nhãn
+      // image/png (sửa lỗi link ảnh vỡ trên web). Video giữ nguyên mime đã lưu.
+      const serveMime = row.mime.startsWith("image/") ? "image/webp" : row.mime;
+      return serveR2(env, row.r2_key, serveMime, req);
     }
 
     // ---------- Công khai: ảnh gốc (để sửa) ----------
@@ -260,8 +265,14 @@ export default {
       if (!row || !row.r2_key_orig) return new Response("Not found", { status: 404, headers: CORS });
       const obj = await env.BUCKET.get(row.r2_key_orig);
       if (!obj) return new Response("Not found", { status: 404, headers: CORS });
-      return new Response(obj.body, {
-        headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=31536000", ...CORS },
+      // Ảnh gốc: item cũ là PNG, item mới là WebP → nhận diện qua magic bytes để gắn
+      // đúng Content-Type (đọc cả object vào RAM — ảnh gốc nhỏ nên không sao).
+      const buf = await obj.arrayBuffer();
+      const b = new Uint8Array(buf.slice(0, 12));
+      const isWebp = b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+                     b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50;
+      return new Response(buf, {
+        headers: { "Content-Type": isWebp ? "image/webp" : "image/png", "Cache-Control": "public, max-age=31536000", ...CORS },
       });
     }
 

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import { AnnotateCanvas } from "../components/AnnotateCanvas";
 import { Toolbar } from "../components/Toolbar";
-import { flattenStage, dataUrlToBlob } from "../lib/flatten";
+import { flattenStage, dataUrlToBlob, imageToWebpBlob } from "../lib/flatten";
 import type { Annotations, Arrow, Box, Note, StepMarker, Tool } from "../types";
 import { nanoid } from "nanoid";
 import jsQR from "jsqr";
@@ -41,6 +41,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
   const stageRef = useRef<Konva.Stage>(null);
   const appliedInit = useRef(false);
+  const lastScale = useRef<number | null>(null); // tỉ lệ hiển thị lần trước, để rescale khi resize (H6)
   const clipboard = useRef<ClipItem | null>(null);
 
   // ── Undo/Redo ──────────────────────────────────────────────
@@ -78,19 +79,20 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   }
 
   function scanQr() {
+    // Người dùng chủ động bấm "Quét QR" → báo rõ cả khi không tìm thấy (silent = false).
     const img = new Image();
-    img.onload = () => runQrDecode(img, true);
+    img.onload = () => runQrDecode(img, false);
     img.onerror = () => {};
     img.src = imageDataUrl;
   }
 
-  // Tải ảnh từ data URL, đồng thời auto-scan QR (im lặng nếu không tìm thấy)
+  // Tải ảnh từ data URL. KHÔNG tự quét QR ở đây: modal "Mã QR" chỉ hiện khi người dùng
+  // chủ động bấm nút Quét QR — tránh popup QR khi chỉ chụp/sửa ảnh bình thường.
   useEffect(() => {
     setQrResult(null);
     const image = new Image();
     image.onload = () => {
       setImg(image);
-      runQrDecode(image, true);
     };
     image.src = imageDataUrl;
   }, [imageDataUrl]);
@@ -105,19 +107,24 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // Phím tắt trong editor
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      // Đang gõ trong ô nhập (ghi chú / tiêu đề)? Bỏ qua phím tắt toàn cục,
-      // nếu không Backspace/Delete/Escape sẽ xoá luôn note đang soạn.
       const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
-        return;
-      }
-      if (e.key === "Escape") {
-        onBack();
-        return;
-      }
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+      const inField = !!(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable));
+
+      // Ctrl/Cmd+S: LUÔN lưu (flatten → upload R2 → cấp link), kể cả khi con trỏ đang ở
+      // ô "Tiêu đề". Trước đây phím tắt bị chặn khi focus trong input nên bấm Ctrl+S lúc
+      // đang gõ tiêu đề sẽ không lưu gì → người dùng tưởng app không tự lưu.
+      if ((e.ctrlKey || e.metaKey) && (e.code === "KeyS" || e.key.toLowerCase() === "s")) {
         e.preventDefault();
         handleSave();
+        return;
+      }
+
+      // Đang gõ trong ô nhập (ghi chú / tiêu đề)? Bỏ qua các phím tắt còn lại,
+      // nếu không Backspace/Delete/Escape sẽ xoá luôn nội dung đang soạn.
+      if (inField) return;
+
+      if (e.key === "Escape") {
+        onBack();
         return;
       }
       // Hoàn tác / Làm lại (e.code không lệ thuộc layout bàn phím)
@@ -201,7 +208,26 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     history.current = [cloneSnap(base)];
     histIndex.current = 0;
     appliedInit.current = true;
+    lastScale.current = fit.scale; // mốc tỉ lệ ban đầu để rescale khi resize (H6)
   }, [img, fit.scale, initialAnnotations]);
+
+  // H6: khi cửa sổ resize/phóng to → fit.scale đổi → rescale MỌI annotation theo tỉ lệ mới
+  // để không lệch khỏi ảnh nền, và Lưu vẫn ra đúng toạ độ gốc (annotation lưu theo toạ độ
+  // hiển thị nên phải co giãn cùng nền).
+  useEffect(() => {
+    if (!img) return;
+    const s = fit.scale;
+    if (lastScale.current === null) { lastScale.current = s; return; }
+    if (s === lastScale.current || s === 0) return;
+    const r = s / lastScale.current;
+    lastScale.current = s;
+    skipRecord.current = true; // rescale không tính là 1 bước undo
+    setBoxes((prev) => prev.map((b) => ({ ...b, x: b.x * r, y: b.y * r, w: b.w * r, h: b.h * r })));
+    setArrows((prev) => prev.map((a) => ({ ...a, x1: a.x1 * r, y1: a.y1 * r, x2: a.x2 * r, y2: a.y2 * r })));
+    setSteps((prev) => prev.map((st) => ({ ...st, x: st.x * r, y: st.y * r })));
+    setNotes((prev) => prev.map((n) => ({ ...n, x: n.x * r, y: n.y * r })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fit.scale, img]);
 
   function deleteSelected() {
     if (!selectedId) return;
@@ -335,9 +361,15 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
 
   async function handleSave() {
     if (!stageRef.current || !img) return;
+    // H7: commit ghi chú đang gõ trước khi xuất ảnh. Blur ô note → onBlur gọi finishNote,
+    // đưa chữ vào state; nếu không (vd bấm Ctrl+S khi con trỏ ở ô note) note sẽ bị bỏ
+    // khỏi ảnh xuất và mất chữ vừa gõ.
+    (document.activeElement as HTMLElement | null)?.blur();
     setSaving(true);
     // Bỏ chọn để Transformer không bị vẽ vào ảnh xuất ra
     setSelectedId(null);
+    // Chờ 2 frame: đủ để state (note vừa commit + bỏ chọn) áp dụng và Konva vẽ lại.
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
     await new Promise((r) => requestAnimationFrame(() => r(null)));
 
     const pixelRatio = 1 / fit.scale; // xuất đúng độ phân giải gốc
@@ -354,8 +386,9 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       notes: notes.map((n) => ({ ...n, x: n.x / s, y: n.y / s })),
     };
 
-    // Ảnh gốc (để sau này sửa lại annotate)
-    const original = dataUrlToBlob(imageDataUrl);
+    // Ảnh gốc (để sau này sửa lại annotate) — nén WebP cho nhẹ.
+    // Trước đây giữ nguyên PNG full màn hình (vài MB) nên upload lên R2 rất lâu.
+    const original = (await imageToWebpBlob(img, 0.92)) ?? dataUrlToBlob(imageDataUrl);
 
     setSaving(false);
     onSaved(blob, original, annotations, title.trim());

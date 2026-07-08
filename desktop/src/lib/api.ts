@@ -20,21 +20,35 @@ export interface UploadResult {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Gọi fetch có tự thử lại khi lỗi mạng (không thử lại khi server trả mã lỗi).
+// Gọi fetch có tự thử lại khi lỗi mạng/treo. WebView2 lúc mới mở app hay để request đầu
+// tiên treo (network stack chưa sẵn sàng, hoặc qua VPN/proxy) → huỷ sau timeoutMs rồi thử
+// lại; lần sau (mạng đã sẵn sàng) thường chạy được. Request khoẻ chỉ ~0.2s nên GET treo
+// >10s coi như kẹt, huỷ sớm để thử lại nhanh thay vì để người dùng chờ.
 async function fetchRetry(
   url: string,
   opts?: RequestInit,
-  attempts = 3,
-  delayMs = 1200
+  attempts = 4,
+  delayMs = 800
 ): Promise<Response> {
+  // Upload (có body: FormData ảnh/video) có thể lâu → 120s; GET nhẹ → 10s.
+  const timeoutMs = opts?.body ? 120000 : 10000;
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      return await globalThis.fetch(url, opts);
+      return await globalThis.fetch(url, { ...opts, signal: ctrl.signal });
     } catch (e) {
       lastErr = e;
-      if (i < attempts - 1) await sleep(delayMs);
+      if (i < attempts - 1) await sleep(delayMs * (i + 1)); // backoff tăng dần
+    } finally {
+      clearTimeout(timer);
     }
+  }
+  // Hết lượt: đổi lỗi kỹ thuật (AbortError/Failed to fetch) thành thông báo rõ, hành động được.
+  const e = lastErr as { name?: string };
+  if (e?.name === "AbortError" || lastErr instanceof TypeError) {
+    throw new Error('Không kết nối được máy chủ (mạng chậm hoặc VPN?). Hãy bấm "Làm mới".');
   }
   throw lastErr;
 }
@@ -96,11 +110,25 @@ async function postUpload(form: FormData): Promise<UploadResult> {
 // ---------- Quản lý ----------
 const authHeader = { "x-api-key": API_KEY };
 
-export async function listItems(): Promise<LibraryItem[]> {
-  const res = await fetchRetry(`${WORKER_URL}/api/items`, { headers: authHeader });
-  if (!res.ok) throw new Error(`Không tải được danh sách (HTTP ${res.status})`);
-  const data = await res.json();
-  return data.items as LibraryItem[];
+// Gộp các lời gọi listItems() đồng thời vào CHUNG một request đang bay.
+// Lúc khởi động (nhất là dev + React.StrictMode) hàm này bị gọi nhiều lần cùng lúc
+// (openLibrary + loadUsageStats × 2). Nếu để chạy song song, một request có thể rớt
+// và hiện "Failed to fetch" dù các request khác thành công. Coalescing → 1 fetch thật,
+// mọi caller nhận cùng kết quả.
+let itemsInFlight: Promise<LibraryItem[]> | null = null;
+
+export function listItems(): Promise<LibraryItem[]> {
+  if (itemsInFlight) return itemsInFlight;
+  const p = (async () => {
+    const res = await fetchRetry(`${WORKER_URL}/api/items`, { headers: authHeader });
+    if (!res.ok) throw new Error(`Không tải được danh sách (HTTP ${res.status})`);
+    const data = await res.json();
+    return data.items as LibraryItem[];
+  })();
+  itemsInFlight = p;
+  // Xong (thành công hay lỗi) thì xoá cache in-flight để lần sau tải dữ liệu mới.
+  p.finally(() => { if (itemsInFlight === p) itemsInFlight = null; });
+  return p;
 }
 
 export async function getItem(id: string): Promise<ItemDetail> {

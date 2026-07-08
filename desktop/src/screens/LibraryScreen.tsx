@@ -60,7 +60,7 @@ const IcoLink = () => <svg {...Ss}><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7
 const IcoEdit = () => <svg {...Ss}><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>;
 const IcoTag = () => <svg {...Ss}><path d="M20.59 13.41 12 22l-9-9V3h10l7.59 7.59a2 2 0 0 1 0 2.82Z"/><circle cx="7.5" cy="7.5" r="1.4"/></svg>;
 const IcoTrash = () => <svg {...Ss}><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>;
-const IcoFilm = () => <svg {...Ss}><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>;
+const IcoPlay = () => <svg viewBox="0 0 24 24" width="22" height="22" fill="#fff"><path d="M8 5v14l11-7z"/></svg>;
 const IcoGrid = () => <svg {...Ss}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>;
 const IcoList = () => <svg {...Ss}><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>;
 const IcoCheckSquare = () => <svg {...Ss}><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>;
@@ -359,7 +359,11 @@ export function LibraryScreen(props: Props) {
                   {it.type === "image" ? (
                     <img src={it.fileUrl} alt={it.title ?? it.id} loading="lazy" />
                   ) : (
-                    <span className="lib-video-label"><IcoFilm />Video</span>
+                    <>
+                      {/* Hiện khung hình ở 0.5s làm preview (preload metadata + media fragment) */}
+                      <video src={`${it.fileUrl}#t=0.5`} preload="metadata" muted playsInline />
+                      <span className="lib-video-play" aria-hidden><IcoPlay /></span>
+                    </>
                   )}
                 </div>
 

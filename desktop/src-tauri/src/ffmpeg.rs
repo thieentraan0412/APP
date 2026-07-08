@@ -21,11 +21,10 @@ pub fn ensure_ffmpeg(app: &AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join("ffmpeg.exe");
 
-    // Đã có và đủ lớn → dùng luôn
-    if let Ok(meta) = fs::metadata(&path) {
-        if meta.len() > MIN_SIZE {
-            return Ok(path);
-        }
+    // Đã có + CHẠY ĐƯỢC → dùng luôn. Chạy `-version` để bắt cả file tải THIẾU (đứt
+    // mạng giữa chừng) lẫn file hỏng đã cache từ trước — chỉ kiểm size 5MB là không đủ (H4).
+    if ffmpeg_runs(&path) {
+        return Ok(path);
     }
 
     // Tải về (stream ra file để không ngốn RAM) + phát tiến độ %.
@@ -59,15 +58,37 @@ pub fn ensure_ffmpeg(app: &AppHandle) -> Result<PathBuf, String> {
             }
         }
     }
-    // Kiểm tra kích thước trước khi dùng
-    let ok = fs::metadata(&tmp).map(|m| m.len() > MIN_SIZE).unwrap_or(false);
-    if !ok {
-        let _ = fs::remove_file(&tmp);
-        return Err("File ffmpeg tải về không hợp lệ".into());
+    // Nếu server báo dung lượng → phải khớp CHÍNH XÁC (chống file tải cụt qua kiểm 5MB).
+    if let Some(t) = total {
+        let got = fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+        if got != t {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("ffmpeg tải chưa xong ({got}/{t} byte) — hãy thử lại"));
+        }
     }
     fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    // Xác thực nhị phân THẬT SỰ chạy được trước khi dùng (bắt file hỏng dù đủ dung lượng).
+    if !ffmpeg_runs(&path) {
+        let _ = fs::remove_file(&path);
+        return Err("File ffmpeg tải về không chạy được — hãy thử lại".into());
+    }
     let _ = app.emit("ffmpeg-ready", ());
     Ok(path)
+}
+
+// ffmpeg.exe tồn tại + chạy `-version` thành công (nhị phân hợp lệ, không cụt/hỏng).
+fn ffmpeg_runs(path: &PathBuf) -> bool {
+    if fs::metadata(path).map(|m| m.len() < MIN_SIZE).unwrap_or(true) {
+        return false; // thiếu hẳn hoặc quá nhỏ → khỏi tốn công spawn
+    }
+    let mut cmd = Command::new(path);
+    cmd.arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 // Cắt video từ `start` đến `end` (giây) → xuất mp4 tạm mới, trả về đường dẫn.
