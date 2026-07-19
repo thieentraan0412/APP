@@ -1,5 +1,6 @@
 // Gọi API Worker để upload, lấy link, và quản lý nội dung.
 import type { Annotations } from "../types";
+import { getToken } from "./auth";
 
 // Đọc cấu hình từ .env (xem desktop/.env.example). Vite chỉ expose biến VITE_*.
 // Lưu ý: API key vẫn nằm trong bản build app desktop nên không thật sự bí mật —
@@ -100,7 +101,7 @@ export async function uploadVideo(blob: Blob): Promise<UploadResult> {
 async function postUpload(form: FormData): Promise<UploadResult> {
   const res = await fetchRetry(`${WORKER_URL}/api/upload`, {
     method: "POST",
-    headers: authHeader,
+    headers: authHeaders(),
     body: form,
   });
   if (!res.ok) throw new Error(`Tải lên thất bại (HTTP ${res.status})`);
@@ -108,7 +109,14 @@ async function postUpload(form: FormData): Promise<UploadResult> {
 }
 
 // ---------- Quản lý ----------
-const authHeader = { "x-api-key": API_KEY };
+// Gửi kèm cả token phiên đăng nhập (Bearer) và API key (tương thích ngược).
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (API_KEY) headers["x-api-key"] = API_KEY;
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  return headers;
+}
 
 // Gộp các lời gọi listItems() đồng thời vào CHUNG một request đang bay.
 // Lúc khởi động (nhất là dev + React.StrictMode) hàm này bị gọi nhiều lần cùng lúc
@@ -120,7 +128,7 @@ let itemsInFlight: Promise<LibraryItem[]> | null = null;
 export function listItems(): Promise<LibraryItem[]> {
   if (itemsInFlight) return itemsInFlight;
   const p = (async () => {
-    const res = await fetchRetry(`${WORKER_URL}/api/items`, { headers: authHeader });
+    const res = await fetchRetry(`${WORKER_URL}/api/items`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`Không tải được danh sách (HTTP ${res.status})`);
     const data = await res.json();
     return data.items as LibraryItem[];
@@ -132,7 +140,7 @@ export function listItems(): Promise<LibraryItem[]> {
 }
 
 export async function getItem(id: string): Promise<ItemDetail> {
-  const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, { headers: authHeader });
+  const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`Không tải được chi tiết (HTTP ${res.status})`);
   return res.json();
 }
@@ -140,7 +148,7 @@ export async function getItem(id: string): Promise<ItemDetail> {
 export async function deleteItem(id: string): Promise<void> {
   const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, {
     method: "DELETE",
-    headers: authHeader,
+    headers: authHeaders(),
   });
   if (!res.ok) throw new Error(`Xoá thất bại (HTTP ${res.status})`);
 }
@@ -168,7 +176,7 @@ export async function updateTitle(id: string, title: string): Promise<{ url: str
 async function patchItem(id: string, form: FormData): Promise<{ url: string }> {
   const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, {
     method: "PATCH",
-    headers: authHeader,
+    headers: authHeaders(),
     body: form,
   });
   if (!res.ok) throw new Error(`Cập nhật thất bại (HTTP ${res.status})`);

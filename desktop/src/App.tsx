@@ -10,6 +10,8 @@ import { LibraryScreen } from "./screens/LibraryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { ConfirmModal } from "./components/ConfirmModal";
 import { UsageScreen } from "./screens/UsageScreen";
+import { AuthScreen } from "./screens/AuthScreen";
+import { fetchMe, logout, getStoredUser, type AuthUser } from "./lib/auth";
 import {
   uploadImage,
   uploadVideo,
@@ -136,6 +138,10 @@ function busted(url: string, v?: number): string {
 }
 
 function App() {
+  // Đăng nhập: null = chưa đăng nhập. authChecked = đã kiểm tra phiên lưu sẵn xong.
+  const [user, setUser] = useState<AuthUser | null>(getStoredUser);
+  const [authChecked, setAuthChecked] = useState(false);
+
   const [screen, setScreen] = useState<Screen>("library");
   const [image, setImage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -298,7 +304,7 @@ function App() {
     };
   }, []);
 
-  // Tải phím tắt đã lưu và áp dụng khi mở app + load thư viện ngay
+  // Tải phím tắt đã lưu và áp dụng khi mở app (không cần đăng nhập)
   useEffect(() => {
     try {
       const saved = localStorage.getItem("shortcuts");
@@ -306,9 +312,21 @@ function App() {
       setShortcuts(cfg);
       invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region, pause: cfg.pause }).catch(() => {});
     } catch {}
+  }, []);
+
+  // Kiểm tra phiên đăng nhập đã lưu khi mở app (token còn hạn?)
+  useEffect(() => {
+    fetchMe()
+      .then((u) => setUser(u))
+      .finally(() => setAuthChecked(true));
+  }, []);
+
+  // Sau khi đăng nhập: load thư viện + thống kê mức dùng
+  useEffect(() => {
+    if (!user) return;
     openLibrary();
     loadUsageStats(true); // load thầm lặng để hiện badge cảnh báo ngay từ đầu
-  }, []);
+  }, [user]);
 
   // Kiểm tra cập nhật khi mở app (im lặng — chỉ hiện thông báo nếu có bản mới)
   useEffect(() => {
@@ -801,6 +819,16 @@ function App() {
     openLibrary();
   }
 
+  async function handleLogout() {
+    await logout();
+    setUser(null);
+    // Dọn dữ liệu phiên cũ khỏi giao diện
+    setLibItems([]);
+    setUsageStats(null);
+    setUsageWarnings([]);
+    setScreen("library");
+  }
+
   const QrModal = qrResult !== null ? (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)",
@@ -917,6 +945,14 @@ function App() {
     </div>
   ) : null;
 
+  // Chưa kiểm tra xong phiên đăng nhập → chưa vẽ gì (tránh nháy màn hình đăng nhập)
+  if (!authChecked) return null;
+
+  // Chưa đăng nhập → hiện màn hình đăng nhập / đăng ký
+  if (!user) {
+    return <AuthScreen onAuthed={(u) => setUser(u)} />;
+  }
+
   if (screen === "editor" && image) {
     return (
       <>
@@ -1023,6 +1059,8 @@ function App() {
               onBack={backHome}
               onCheckUpdate={manualCheckUpdate}
               updateChecking={updateChecking}
+              userEmail={user.email}
+              onLogout={handleLogout}
             />
           )}
         </div>

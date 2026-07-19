@@ -9,6 +9,8 @@ interface Props {
   onBack: () => void;
   onCheckUpdate: () => void;
   updateChecking: boolean;
+  userEmail: string;
+  onLogout: () => void;
 }
 
 // Lấy tên phím từ event (dùng e.code để không lệ thuộc Shift, vd Shift+1)
@@ -73,14 +75,14 @@ function ShortcutCapture({
   );
 }
 
-export function SettingsScreen({ capture, record, region, pause, onSave, onBack, onCheckUpdate, updateChecking }: Props) {
+export function SettingsScreen({ capture, record, region, pause, onSave, onBack, onCheckUpdate, updateChecking, userEmail, onLogout }: Props) {
   const [cap, setCap] = useState(capture);
   const [rec, setRec] = useState(record);
   const [reg, setReg] = useState(region);
   const [pau, setPau] = useState(pause);
 
   return (
-    <main className="container">
+    <main className="container settings-page">
       <div className="topbar">
         <h2 style={{ margin: 0, flex: 1 }}>Cài đặt</h2>
         <button onClick={onBack}>← Trang chính</button>
@@ -116,6 +118,20 @@ export function SettingsScreen({ capture, record, region, pause, onSave, onBack,
         <div className="row" style={{ justifyContent: "flex-start" }}>
           <button onClick={onCheckUpdate} disabled={updateChecking}>
             {updateChecking ? "Đang kiểm tra…" : "Kiểm tra cập nhật"}
+          </button>
+        </div>
+
+        <h3 style={{ marginTop: 28 }}>Tài khoản</h3>
+        <div className="setting-row">
+          <span className="setting-label">Đang đăng nhập</span>
+          <span style={{ fontWeight: 600 }}>{userEmail}</span>
+        </div>
+        <div className="row" style={{ justifyContent: "flex-start", marginTop: 8 }}>
+          <button
+            onClick={onLogout}
+            style={{ color: "var(--danger)", borderColor: "#fca5a5" }}
+          >
+            Đăng xuất
           </button>
         </div>
       </div>

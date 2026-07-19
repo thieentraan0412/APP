@@ -312,8 +312,17 @@ kbd {
 }
 
 /* ----- Cài đặt ----- */
+/* Màn Cài đặt nằm trong vùng flex overflow:hidden → tự cuộn nội bộ,
+   tránh cắt mất phần cuối (mục Tài khoản / nút Đăng xuất) khi cửa sổ thấp. */
+.settings-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .settings {
   max-width: 540px;
+  padding-bottom: 1.5rem;
 }
 
 .settings h3 {
