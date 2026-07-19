@@ -22,8 +22,10 @@ export interface Env {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, HEAD, POST, PATCH, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, x-api-key",
+  "Access-Control-Allow-Headers": "Content-Type, x-api-key, Authorization",
 };
+
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // phiên đăng nhập sống 30 ngày
 
 function makeId(len = 10): string {
   const chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -40,11 +42,90 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-// Bảo vệ route quản lý (trim để tránh lệch do khoảng trắng/xuống dòng)
-function authed(req: Request, env: Env): boolean {
+// ---------- Mật khẩu (PBKDF2-SHA256 qua WebCrypto) ----------
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out;
+}
+
+async function derivePasswordHash(password: string, salt: Uint8Array): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt, iterations: 100_000, hash: "SHA-256" },
+    key,
+    256
+  );
+  return bytesToHex(new Uint8Array(bits));
+}
+
+async function hashPassword(password: string): Promise<{ hash: string; salt: string }> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const hash = await derivePasswordHash(password, salt);
+  return { hash, salt: bytesToHex(salt) };
+}
+
+async function verifyPassword(password: string, saltHex: string, expectedHash: string): Promise<boolean> {
+  const hash = await derivePasswordHash(password, hexToBytes(saltHex));
+  // So sánh hằng-thời-gian để tránh lộ thông tin qua thời gian phản hồi
+  if (hash.length !== expectedHash.length) return false;
+  let diff = 0;
+  for (let i = 0; i < hash.length; i++) diff |= hash.charCodeAt(i) ^ expectedHash.charCodeAt(i);
+  return diff === 0;
+}
+
+interface UserRow {
+  id: string;
+  email: string;
+  password_hash: string;
+  password_salt: string;
+  created_at: number;
+}
+
+// Tạo phiên đăng nhập mới, trả về token cho client.
+async function createSession(env: Env, userId: string): Promise<string> {
+  const token = makeId(32);
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`
+  )
+    .bind(token, userId, now, now + SESSION_TTL_MS)
+    .run();
+  return token;
+}
+
+// Lấy user từ session token (Authorization: Bearer <token>); null nếu không hợp lệ/hết hạn.
+async function getSessionUser(req: Request, env: Env): Promise<UserRow | null> {
+  const auth = req.headers.get("Authorization")?.trim();
+  if (!auth || !/^Bearer\s+/i.test(auth)) return null;
+  const token = auth.replace(/^Bearer\s+/i, "").trim();
+  if (!token) return null;
+  const row = await env.DB.prepare(
+    `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token = ? AND s.expires_at > ?`
+  )
+    .bind(token, Date.now())
+    .first<UserRow>();
+  return row || null;
+}
+
+// Bảo vệ route quản lý: hợp lệ nếu có session đăng nhập HOẶC đúng API_KEY (tương thích ngược).
+async function authed(req: Request, env: Env): Promise<boolean> {
   const sent = req.headers.get("x-api-key")?.trim();
   const expected = env.API_KEY?.trim();
-  return !!expected && sent === expected;
+  if (expected && sent === expected) return true;
+  return (await getSessionUser(req, env)) !== null;
 }
 
 // Lấy File từ form (form.get trả về File | string | null)
@@ -120,9 +201,80 @@ export default {
       return new Response(null, { status: 204, headers: CORS });
     }
 
+    // ---------- Đăng ký tài khoản ----------
+    if (req.method === "POST" && path === "/api/auth/register") {
+      let body: { email?: string; password?: string };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Dữ liệu không hợp lệ" }, 400);
+      }
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return json({ error: "Email không hợp lệ" }, 400);
+      }
+      if (password.length < 6) {
+        return json({ error: "Mật khẩu phải từ 6 ký tự trở lên" }, 400);
+      }
+
+      const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?")
+        .bind(email)
+        .first<{ id: string }>();
+      if (existing) return json({ error: "Email này đã được đăng ký" }, 409);
+
+      const userId = makeId(16);
+      const { hash, salt } = await hashPassword(password);
+      await env.DB.prepare(
+        `INSERT INTO users (id, email, password_hash, password_salt, created_at)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+        .bind(userId, email, hash, salt, Date.now())
+        .run();
+
+      const token = await createSession(env, userId);
+      return json({ token, user: { id: userId, email } }, 201);
+    }
+
+    // ---------- Đăng nhập ----------
+    if (req.method === "POST" && path === "/api/auth/login") {
+      let body: { email?: string; password?: string };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Dữ liệu không hợp lệ" }, 400);
+      }
+      const email = String(body.email || "").trim().toLowerCase();
+      const password = String(body.password || "");
+
+      const user = await env.DB.prepare("SELECT * FROM users WHERE email = ?")
+        .bind(email)
+        .first<UserRow>();
+      const ok = user && (await verifyPassword(password, user.password_salt, user.password_hash));
+      if (!ok || !user) return json({ error: "Email hoặc mật khẩu không đúng" }, 401);
+
+      const token = await createSession(env, user.id);
+      return json({ token, user: { id: user.id, email: user.email } });
+    }
+
+    // ---------- Đăng xuất ----------
+    if (req.method === "POST" && path === "/api/auth/logout") {
+      const auth = req.headers.get("Authorization")?.trim();
+      const token = auth?.replace(/^Bearer\s+/i, "").trim();
+      if (token) await env.DB.prepare("DELETE FROM sessions WHERE token = ?").bind(token).run();
+      return json({ ok: true });
+    }
+
+    // ---------- Thông tin tài khoản hiện tại ----------
+    if (req.method === "GET" && path === "/api/auth/me") {
+      const user = await getSessionUser(req, env);
+      if (!user) return json({ error: "Chưa đăng nhập" }, 401);
+      return json({ user: { id: user.id, email: user.email, createdAt: user.created_at } });
+    }
+
     // ---------- Tạo mới ----------
     if (req.method === "POST" && path === "/api/upload") {
-      if (!authed(req, env)) return json({ error: "Không có quyền" }, 401);
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
       try {
         const form = await req.formData();
         const file = asFile(form.get("file"));
@@ -166,7 +318,7 @@ export default {
 
     // ---------- Quản lý: liệt kê ----------
     if (req.method === "GET" && path === "/api/items") {
-      if (!authed(req, env)) return json({ error: "Không có quyền" }, 401);
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
       const { results } = await env.DB.prepare(
         `SELECT id, type, annotations, title, created_at FROM items ORDER BY created_at DESC LIMIT 200`
       ).all<Pick<ItemRow, "id" | "type" | "annotations" | "title" | "created_at">>();
@@ -186,7 +338,7 @@ export default {
     const mItem = path.match(/^\/api\/items\/([^/]+)$/);
     if (mItem) {
       const id = mItem[1];
-      if (!authed(req, env)) return json({ error: "Không có quyền" }, 401);
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
 
       const row = await env.DB.prepare("SELECT * FROM items WHERE id = ?")
         .bind(id)
@@ -279,10 +431,18 @@ export default {
     // ---------- Công khai: trang xem ----------
     if (req.method === "GET" && path.startsWith("/v/")) {
       const id = path.slice("/v/".length);
-      const row = await env.DB.prepare("SELECT type, title FROM items WHERE id = ?")
+      const row = await env.DB.prepare("SELECT type, title, r2_key FROM items WHERE id = ?")
         .bind(id)
-        .first<Pick<ItemRow, "type" | "title">>();
+        .first<Pick<ItemRow, "type" | "title" | "r2_key">>();
       if (!row) return new Response("Not found", { status: 404 });
+
+      // Version token = thời điểm file được ghi vào R2. Khi sửa ảnh, file bị ghi đè
+      // nên token đổi → URL ảnh đổi → phá cache của trình duyệt/CDN (ảnh cũ đã đặt
+      // Cache-Control 1 năm). Ảnh chưa sửa vẫn dùng cache như cũ, không tốn thêm.
+      const head = await env.BUCKET.head(row.r2_key);
+      const ver = head?.uploaded ? head.uploaded.getTime() : "";
+      const fileSrc = `/file/${id}${ver ? `?v=${ver}` : ""}`;
+
       // Thoát HTML cho tiêu đề
       const esc = (s: string) =>
         s.replace(/[&<>"']/g, (c) =>
@@ -295,7 +455,7 @@ export default {
 
       const media =
         row.type === "video"
-          ? `<video id="vid" src="/file/${id}" controls autoplay muted playsinline style="max-width:100%;max-height:78vh"></video>
+          ? `<video id="vid" src="${fileSrc}" controls autoplay muted playsinline style="max-width:100%;max-height:78vh"></video>
 <div class="skip">
   <button onclick="seek(-10)">⏪ 10s</button>
   <button onclick="seek(-5)">◀ 5s</button>
@@ -306,7 +466,7 @@ export default {
 function seek(d){var v=document.getElementById('vid');if(!v)return;var t=v.currentTime+d;v.currentTime=Math.max(0,Math.min(v.duration||1e9,t));}
 document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);else if(e.key==='ArrowRight')seek(5);else if(e.key==='j')seek(-10);else if(e.key==='l')seek(10);});
 </script>`
-          : `<img src="/file/${id}" style="max-width:100%;max-height:90vh"/>`;
+          : `<img src="${fileSrc}" style="max-width:100%;max-height:90vh"/>`;
 
       const html = `<!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
@@ -321,7 +481,13 @@ document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);
 <body>
 ${heading}${media}
 </body></html>`;
-      return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return new Response(html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          // Không cache trang HTML → luôn nhúng version token mới nhất của ảnh sau khi sửa
+          "Cache-Control": "no-cache, must-revalidate",
+        },
+      });
     }
 
     if (req.method === "GET" && path === "/") {
