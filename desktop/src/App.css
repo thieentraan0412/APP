@@ -356,6 +356,160 @@ kbd {
   box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
 }
 
+/* ===================== Settings — card layout ===================== */
+.settings-shell {
+  max-width: 660px;
+  margin: 0 auto;
+  padding-bottom: 2rem;
+}
+
+.settings-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0.25rem 0 1.5rem;
+}
+.settings-header h2 {
+  margin: 0;
+  font-size: 1.55rem;
+  letter-spacing: -0.02em;
+}
+.settings-subtitle {
+  margin: 0.3rem 0 0;
+  font-size: 0.875rem;
+  color: var(--text-soft);
+}
+.settings-back {
+  flex-shrink: 0;
+}
+
+.settings-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 1.25rem 1.4rem 1.35rem;
+  margin-bottom: 1.1rem;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.settings-card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  margin-bottom: 1.15rem;
+}
+.settings-card-icon {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.settings-card-heading {
+  min-width: 0;
+}
+.settings-card-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.settings-card-desc {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+
+.settings-card-body .setting-row:first-child {
+  padding-top: 0;
+}
+.settings-card-body .setting-row:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* Hàng hành động: có gạch phân cách phía trên (dùng cho card phím tắt) */
+.settings-card-footer {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 1.15rem;
+  padding-top: 1.15rem;
+  border-top: 1px solid var(--border);
+}
+/* Hàng hành động không gạch phân cách (card ít nội dung) */
+.settings-card-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* Tài khoản */
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+.account-avatar {
+  flex-shrink: 0;
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: #fff;
+  text-transform: uppercase;
+  background: linear-gradient(135deg, var(--primary), #8b7cf6);
+  box-shadow: var(--shadow-sm);
+}
+.account-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.account-email {
+  font-weight: 600;
+  font-size: 0.92rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  color: var(--success);
+}
+.account-status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: #fca5a5;
+}
+.btn-danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+}
+
 /* ===================== Editor ===================== */
 .editor {
   display: flex;

@@ -42,6 +42,22 @@ function pretty(s: string): string {
   return s.replace("Control", "Ctrl").replace("Super", "Win").split("+").join(" + ");
 }
 
+// Icon props chung (nét mảnh, dùng currentColor như sidebar)
+const IconS = {
+  width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const,
+  stroke: "currentColor", strokeWidth: 2,
+  strokeLinecap: "round" as const, strokeLinejoin: "round" as const,
+};
+const KeyboardIcon = (
+  <svg {...IconS}><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" /></svg>
+);
+const UpdateIcon = (
+  <svg {...IconS}><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v5h-5" /></svg>
+);
+const UserIcon = (
+  <svg {...IconS}><circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></svg>
+);
+
 function ShortcutCapture({
   label,
   value,
@@ -81,59 +97,87 @@ export function SettingsScreen({ capture, record, region, pause, onSave, onBack,
   const [reg, setReg] = useState(region);
   const [pau, setPau] = useState(pause);
 
+  const initial = userEmail.trim().charAt(0) || "?";
+
   return (
     <main className="container settings-page">
-      <div className="topbar">
-        <h2 style={{ margin: 0, flex: 1 }}>Cài đặt</h2>
-        <button onClick={onBack}>← Trang chính</button>
-      </div>
+      <div className="settings-shell">
+        <header className="settings-header">
+          <div>
+            <h2>Cài đặt</h2>
+            <p className="settings-subtitle">Tuỳ chỉnh phím tắt, cập nhật và tài khoản</p>
+          </div>
+          <button className="settings-back" onClick={onBack}>← Trang chính</button>
+        </header>
 
-      <div className="settings">
-        <h3>Phím tắt toàn cục</h3>
-        <ShortcutCapture label="Chụp ảnh" value={cap} onChange={setCap} />
-        <ShortcutCapture label="Chụp vùng màn hình" value={reg} onChange={setReg} />
-        <ShortcutCapture label="Quay / dừng video" value={rec} onChange={setRec} />
-        <ShortcutCapture label="Tạm dừng / quay tiếp" value={pau} onChange={setPau} />
-        <p className="hint">
-          Bấm vào ô bên phải rồi nhấn tổ hợp phím mới (cần ít nhất một phím Ctrl / Shift / Alt).
-        </p>
-        <div className="row" style={{ justifyContent: "flex-start" }}>
-          <button className="primary" onClick={() => onSave(cap, rec, reg, pau)}>
-            Lưu phím tắt
-          </button>
-          <button
-            onClick={() => {
-              setCap("Control+Shift+1");
-              setReg("Control+Shift+3");
-              setRec("Control+Shift+2");
-              setPau("Control+Shift+H");
-            }}
-          >
-            Khôi phục mặc định
-          </button>
-        </div>
+        {/* Phím tắt toàn cục */}
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-icon">{KeyboardIcon}</div>
+            <div className="settings-card-heading">
+              <h3 className="settings-card-title">Phím tắt toàn cục</h3>
+              <p className="settings-card-desc">
+                Bấm vào ô bên phải rồi nhấn tổ hợp phím mới (cần ít nhất một phím Ctrl / Shift / Alt).
+              </p>
+            </div>
+          </div>
+          <div className="settings-card-body">
+            <ShortcutCapture label="Chụp ảnh" value={cap} onChange={setCap} />
+            <ShortcutCapture label="Chụp vùng màn hình" value={reg} onChange={setReg} />
+            <ShortcutCapture label="Quay / dừng video" value={rec} onChange={setRec} />
+            <ShortcutCapture label="Tạm dừng / quay tiếp" value={pau} onChange={setPau} />
+          </div>
+          <div className="settings-card-footer">
+            <button className="primary" onClick={() => onSave(cap, rec, reg, pau)}>
+              Lưu phím tắt
+            </button>
+            <button
+              onClick={() => {
+                setCap("Control+Shift+1");
+                setReg("Control+Shift+3");
+                setRec("Control+Shift+2");
+                setPau("Control+Shift+H");
+              }}
+            >
+              Khôi phục mặc định
+            </button>
+          </div>
+        </section>
 
-        <h3 style={{ marginTop: 28 }}>Cập nhật ứng dụng</h3>
-        <p className="hint">Kiểm tra và cài phiên bản mới nhất.</p>
-        <div className="row" style={{ justifyContent: "flex-start" }}>
-          <button onClick={onCheckUpdate} disabled={updateChecking}>
-            {updateChecking ? "Đang kiểm tra…" : "Kiểm tra cập nhật"}
-          </button>
-        </div>
+        {/* Cập nhật ứng dụng */}
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-icon">{UpdateIcon}</div>
+            <div className="settings-card-heading">
+              <h3 className="settings-card-title">Cập nhật ứng dụng</h3>
+              <p className="settings-card-desc">Kiểm tra và cài phiên bản mới nhất.</p>
+            </div>
+          </div>
+          <div className="settings-card-actions">
+            <button onClick={onCheckUpdate} disabled={updateChecking}>
+              {updateChecking ? "Đang kiểm tra…" : "Kiểm tra cập nhật"}
+            </button>
+          </div>
+        </section>
 
-        <h3 style={{ marginTop: 28 }}>Tài khoản</h3>
-        <div className="setting-row">
-          <span className="setting-label">Đang đăng nhập</span>
-          <span style={{ fontWeight: 600 }}>{userEmail}</span>
-        </div>
-        <div className="row" style={{ justifyContent: "flex-start", marginTop: 8 }}>
-          <button
-            onClick={onLogout}
-            style={{ color: "var(--danger)", borderColor: "#fca5a5" }}
-          >
-            Đăng xuất
-          </button>
-        </div>
+        {/* Tài khoản */}
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-icon">{UserIcon}</div>
+            <div className="settings-card-heading">
+              <h3 className="settings-card-title">Tài khoản</h3>
+              <p className="settings-card-desc">Quản lý phiên đăng nhập trên thiết bị này.</p>
+            </div>
+          </div>
+          <div className="account-row">
+            <div className="account-avatar">{initial}</div>
+            <div className="account-info">
+              <span className="account-email">{userEmail}</span>
+              <span className="account-status"><span className="dot" /> Đang đăng nhập</span>
+            </div>
+            <button className="btn-danger" onClick={onLogout}>Đăng xuất</button>
+          </div>
+        </section>
       </div>
     </main>
   );
