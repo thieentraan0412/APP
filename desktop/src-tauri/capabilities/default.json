@@ -15,6 +15,9 @@
     "process:allow-restart",
     "notification:default",
     "dialog:allow-save",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
     {
       "identifier": "fs:allow-read-file",
       "allow": [{ "path": "$TEMP/**" }]

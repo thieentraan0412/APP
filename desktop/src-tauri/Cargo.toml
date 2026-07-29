@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.1.5"
+version = "0.1.6"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -36,6 +36,7 @@ tauri-plugin-process = "2.3.1"
 tauri-plugin-notification = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
 
 # Tối ưu thời gian BUILD (app nhẹ nên không cần tối ưu runtime cao):
 # opt-level 1 + nhiều codegen-units -> compile nhanh hơn nhiều so với mặc định (opt-level 3).

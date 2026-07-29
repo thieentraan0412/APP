@@ -124,6 +124,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // Tự khởi động cùng Windows. Khi được máy chạy lúc boot sẽ kèm cờ "--minimized"
+        // để app ẩn xuống khay hệ thống thay vì bật cửa sổ (xem xử lý trong .setup).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .manage(record::RecState::default())
         .manage(ShortcutCfg::default())
         .manage(capture::RegionState::default())
@@ -151,6 +157,13 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // Khởi động cùng máy (cờ "--minimized"): ẩn cửa sổ chính xuống tray, không bật lên.
+            if std::env::args().any(|a| a == "--minimized") {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
+                }
+            }
+
             let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION, DEFAULT_PAUSE);
 
             let capture_i = MenuItem::with_id(app, "capture", "Chụp màn hình", true, None::<&str>)?;

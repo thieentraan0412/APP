@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 interface Props {
   capture: string;
@@ -57,6 +58,9 @@ const UpdateIcon = (
 const UserIcon = (
   <svg {...IconS}><circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></svg>
 );
+const PowerIcon = (
+  <svg {...IconS}><path d="M18.36 6.64a9 9 0 1 1-12.73 0" /><line x1="12" y1="2" x2="12" y2="12" /></svg>
+);
 
 function ShortcutCapture({
   label,
@@ -96,6 +100,31 @@ export function SettingsScreen({ capture, record, region, pause, onSave, onBack,
   const [rec, setRec] = useState(record);
   const [reg, setReg] = useState(region);
   const [pau, setPau] = useState(pause);
+
+  // Tự khởi động cùng máy — đọc trạng thái thật từ hệ điều hành khi mở Cài đặt.
+  const [autostart, setAutostart] = useState(false);
+  const [autostartBusy, setAutostartBusy] = useState(true);
+
+  useEffect(() => {
+    isEnabled()
+      .then(setAutostart)
+      .catch(() => {})
+      .finally(() => setAutostartBusy(false));
+  }, []);
+
+  async function toggleAutostart(next: boolean) {
+    setAutostartBusy(true);
+    try {
+      if (next) await enable();
+      else await disable();
+      // Đọc lại từ OS để chắc chắn khớp trạng thái thực tế
+      setAutostart(await isEnabled());
+    } catch {
+      // Lỗi (hiếm) → giữ nguyên trạng thái cũ
+    } finally {
+      setAutostartBusy(false);
+    }
+  }
 
   const initial = userEmail.trim().charAt(0) || "?";
 
@@ -141,6 +170,33 @@ export function SettingsScreen({ capture, record, region, pause, onSave, onBack,
             >
               Khôi phục mặc định
             </button>
+          </div>
+        </section>
+
+        {/* Khởi động cùng máy */}
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-icon">{PowerIcon}</div>
+            <div className="settings-card-heading">
+              <h3 className="settings-card-title">Khởi động cùng máy</h3>
+              <p className="settings-card-desc">
+                Tự động mở app (ẩn sẵn dưới khay hệ thống) mỗi khi bật Windows.
+              </p>
+            </div>
+          </div>
+          <div className="settings-card-body">
+            <div className="setting-row">
+              <span className="setting-label">Bật tự khởi động</span>
+              <label className="switch" title={autostart ? "Đang bật" : "Đang tắt"}>
+                <input
+                  type="checkbox"
+                  checked={autostart}
+                  disabled={autostartBusy}
+                  onChange={(e) => toggleAutostart(e.target.checked)}
+                />
+                <span className="switch-slider" />
+              </label>
+            </div>
           </div>
         </section>
 
