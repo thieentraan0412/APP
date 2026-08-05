@@ -184,18 +184,52 @@ async function patchItem(id: string, form: FormData): Promise<{ url: string }> {
 }
 
 export interface UsageStats {
-  totalItems: number;
-  imageCount: number;
-  videoCount: number;
-  estimatedMB: number;
+  generatedAt: number;
+  r2: {
+    bytes: number;
+    objectCount: number;
+    imageBytes: number;
+    videoBytes: number;
+    originalBytes: number;
+    otherBytes: number;
+    listOperations: number;
+  };
+  d1: {
+    bytes: number;
+    rowsReadByThisRefresh: number;
+    totalItems: number;
+    imageCount: number;
+    videoCount: number;
+    userCount: number;
+    sessionCount: number;
+    oldestItemAt: number | null;
+    newestItemAt: number | null;
+  };
+  growth: {
+    last7Days: UsageGrowthPeriod;
+    last30Days: UsageGrowthPeriod;
+  };
 }
 
-export function calcStats(items: LibraryItem[]): UsageStats {
-  const imageCount = items.filter((i) => i.type === "image").length;
-  const videoCount = items.filter((i) => i.type === "video").length;
-  // Sau tối ưu: ảnh WebP ~0.4MB, video CRF28/24fps ~6MB trung bình
-  const estimatedMB = imageCount * 0.4 + videoCount * 6;
-  return { totalItems: items.length, imageCount, videoCount, estimatedMB };
+export interface UsageGrowthPeriod {
+  items: number;
+  images: number;
+  videos: number;
+}
+
+let usageInFlight: Promise<UsageStats> | null = null;
+
+/** Lấy số liệu thật trên toàn bucket R2 và toàn database D1 (không bị LIMIT 200). */
+export function getUsageStats(): Promise<UsageStats> {
+  if (usageInFlight) return usageInFlight;
+  const p = (async () => {
+    const res = await fetchRetry(`${WORKER_URL}/api/usage`, { headers: authHeaders() });
+    if (!res.ok) throw new Error(`Không tải được thống kê (HTTP ${res.status})`);
+    return res.json() as Promise<UsageStats>;
+  })();
+  usageInFlight = p;
+  p.finally(() => { if (usageInFlight === p) usageInFlight = null; });
+  return p;
 }
 
 // Tải một URL ảnh về dạng data URL (để mở lại trong editor khi sửa)

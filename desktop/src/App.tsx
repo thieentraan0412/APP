@@ -21,7 +21,7 @@ import {
   updateItem,
   updateTitle,
   fetchAsDataUrl,
-  calcStats,
+  getUsageStats,
   type LibraryItem,
   type UsageStats,
 } from "./lib/api";
@@ -38,25 +38,16 @@ const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
 const SidebarS = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
 
 const USAGE_LIMITS = {
-  r2StorageMB: 10 * 1024, r2ClassAPerMonth: 1_000_000, r2ClassBPerMonth: 10_000_000,
-  d1StorageMB: 500, d1RowsReadPerDay: 5_000_000, d1RowsWritePerDay: 100_000, workersReqPerDay: 100_000,
+  r2StorageBytes: 10 * 1024 ** 3,
+  d1DatabaseBytes: 500 * 1000 ** 2,
 };
 
 function checkUsageWarnings(stats: UsageStats): string[] {
-  const s = stats;
-  const estR2MB   = s.estimatedMB;
-  const estOpsA   = s.totalItems * 2;
-  const estOpsB   = s.totalItems * 10;
-  const estD1MB   = s.totalItems * 0.002;
-  const estD1R    = s.totalItems * 5;
-  const estWrkDay = Math.round(s.totalItems * 12 / 30);
   const warns: string[] = [];
-  if (estR2MB   / USAGE_LIMITS.r2StorageMB      >= 0.9) warns.push(`R2 Storage đạt ${((estR2MB/USAGE_LIMITS.r2StorageMB)*100).toFixed(0)}% (giới hạn 10 GB)`);
-  if (estOpsA   / USAGE_LIMITS.r2ClassAPerMonth  >= 0.9) warns.push(`R2 Write ops đạt ${((estOpsA/USAGE_LIMITS.r2ClassAPerMonth)*100).toFixed(0)}% (giới hạn 1M/tháng)`);
-  if (estOpsB   / USAGE_LIMITS.r2ClassBPerMonth  >= 0.9) warns.push(`R2 Read ops đạt ${((estOpsB/USAGE_LIMITS.r2ClassBPerMonth)*100).toFixed(0)}% (giới hạn 10M/tháng)`);
-  if (estD1MB   / USAGE_LIMITS.d1StorageMB       >= 0.9) warns.push(`D1 Storage đạt ${((estD1MB/USAGE_LIMITS.d1StorageMB)*100).toFixed(0)}% (giới hạn 500 MB)`);
-  if (estD1R    / USAGE_LIMITS.d1RowsReadPerDay  >= 0.9) warns.push(`D1 Rows read đạt ${((estD1R/USAGE_LIMITS.d1RowsReadPerDay)*100).toFixed(0)}% (giới hạn 5M/ngày)`);
-  if (estWrkDay / USAGE_LIMITS.workersReqPerDay  >= 0.9) warns.push(`Workers Requests đạt ${((estWrkDay/USAGE_LIMITS.workersReqPerDay)*100).toFixed(0)}% (giới hạn 100K/ngày)`);
+  const r2Pct = stats.r2.bytes / USAGE_LIMITS.r2StorageBytes;
+  const d1Pct = stats.d1.bytes / USAGE_LIMITS.d1DatabaseBytes;
+  if (r2Pct >= 0.9) warns.push(`R2 Storage đạt ${(r2Pct * 100).toFixed(0)}% (giới hạn 10 GB)`);
+  if (d1Pct >= 0.9) warns.push(`D1 Database đạt ${(d1Pct * 100).toFixed(0)}% (giới hạn 500 MB)`);
   return warns;
 }
 
@@ -668,8 +659,7 @@ function App() {
   async function loadUsageStats(silent = false) {
     if (!silent) setUsageLoading(true);
     try {
-      const items = await listItems();
-      const stats = calcStats(items);
+      const stats = await getUsageStats();
       setUsageStats(stats);
       const warns = checkUsageWarnings(stats);
       setUsageWarnings(warns);

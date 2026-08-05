@@ -8,6 +8,7 @@
 // Ghi / quản lý (cần header x-api-key = API_KEY):
 //   POST   /api/upload       tạo mới: file (+ original + annotations) -> R2 + D1 -> { id, url }
 //   GET    /api/items        liệt kê
+//   GET    /api/usage        thống kê toàn bộ R2 + D1 và tốc độ tăng dữ liệu
 //   GET    /api/items/:id    chi tiết (kèm annotations)
 //   PATCH  /api/items/:id    sửa: thay ảnh đã gộp + annotations
 //   DELETE /api/items/:id    xoá: xoá file R2 + bản ghi D1
@@ -126,6 +127,53 @@ async function authed(req: Request, env: Env): Promise<boolean> {
   const expected = env.API_KEY?.trim();
   if (expected && sent === expected) return true;
   return (await getSessionUser(req, env)) !== null;
+}
+
+interface R2Usage {
+  bytes: number;
+  objectCount: number;
+  imageBytes: number;
+  videoBytes: number;
+  originalBytes: number;
+  otherBytes: number;
+  listOperations: number;
+}
+
+// R2.list() chỉ trả tối đa 1.000 object mỗi trang. Lặp cursor để thống kê toàn bộ
+// bucket; size có sẵn trong kết quả nên không cần HEAD từng object (tránh Class B ops).
+async function getR2Usage(bucket: R2Bucket): Promise<R2Usage> {
+  const usage: R2Usage = {
+    bytes: 0,
+    objectCount: 0,
+    imageBytes: 0,
+    videoBytes: 0,
+    originalBytes: 0,
+    otherBytes: 0,
+    listOperations: 0,
+  };
+  let cursor: string | undefined;
+
+  do {
+    const page = await bucket.list({ limit: 1000, cursor });
+    usage.listOperations += 1;
+    for (const object of page.objects) {
+      usage.bytes += object.size;
+      usage.objectCount += 1;
+      if (object.key.endsWith("_orig.webp")) {
+        usage.originalBytes += object.size;
+        usage.imageBytes += object.size;
+      } else if (object.key.endsWith(".mp4")) {
+        usage.videoBytes += object.size;
+      } else if (/\.(?:webp|png|jpe?g)$/i.test(object.key)) {
+        usage.imageBytes += object.size;
+      } else {
+        usage.otherBytes += object.size;
+      }
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+
+  return usage;
 }
 
 // Lấy File từ form (form.get trả về File | string | null)
@@ -270,6 +318,87 @@ export default {
       const user = await getSessionUser(req, env);
       if (!user) return json({ error: "Chưa đăng nhập" }, 401);
       return json({ user: { id: user.id, email: user.email, createdAt: user.created_at } });
+    }
+
+    // ---------- Thống kê toàn bộ dữ liệu Cloudflare ----------
+    if (req.method === "GET" && path === "/api/usage") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+
+      type UsageRow = {
+        total_items: number;
+        image_count: number;
+        video_count: number;
+        items_7d: number;
+        images_7d: number;
+        videos_7d: number;
+        items_30d: number;
+        images_30d: number;
+        videos_30d: number;
+        oldest_item_at: number | null;
+        newest_item_at: number | null;
+        user_count: number;
+        session_count: number;
+      };
+
+      const now = Date.now();
+      const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+      const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+      const [r2, d1Result] = await Promise.all([
+        getR2Usage(env.BUCKET),
+        env.DB.prepare(
+          `SELECT
+             COUNT(*) AS total_items,
+             COALESCE(SUM(CASE WHEN type = 'image' THEN 1 ELSE 0 END), 0) AS image_count,
+             COALESCE(SUM(CASE WHEN type = 'video' THEN 1 ELSE 0 END), 0) AS video_count,
+             COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS items_7d,
+             COALESCE(SUM(CASE WHEN created_at >= ? AND type = 'image' THEN 1 ELSE 0 END), 0) AS images_7d,
+             COALESCE(SUM(CASE WHEN created_at >= ? AND type = 'video' THEN 1 ELSE 0 END), 0) AS videos_7d,
+             COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS items_30d,
+             COALESCE(SUM(CASE WHEN created_at >= ? AND type = 'image' THEN 1 ELSE 0 END), 0) AS images_30d,
+             COALESCE(SUM(CASE WHEN created_at >= ? AND type = 'video' THEN 1 ELSE 0 END), 0) AS videos_30d,
+             MIN(created_at) AS oldest_item_at,
+             MAX(created_at) AS newest_item_at,
+             (SELECT COUNT(*) FROM users) AS user_count,
+             (SELECT COUNT(*) FROM sessions) AS session_count
+           FROM items`
+        )
+          .bind(
+            sevenDaysAgo, sevenDaysAgo, sevenDaysAgo,
+            thirtyDaysAgo, thirtyDaysAgo, thirtyDaysAgo
+          )
+          .all<UsageRow>(),
+      ]);
+
+      const row = d1Result.results?.[0];
+      if (!row) return json({ error: "Không đọc được thống kê D1" }, 500);
+
+      return json({
+        generatedAt: now,
+        r2,
+        d1: {
+          bytes: d1Result.meta.size_after,
+          rowsReadByThisRefresh: d1Result.meta.rows_read,
+          totalItems: row.total_items,
+          imageCount: row.image_count,
+          videoCount: row.video_count,
+          userCount: row.user_count,
+          sessionCount: row.session_count,
+          oldestItemAt: row.oldest_item_at,
+          newestItemAt: row.newest_item_at,
+        },
+        growth: {
+          last7Days: {
+            items: row.items_7d,
+            images: row.images_7d,
+            videos: row.videos_7d,
+          },
+          last30Days: {
+            items: row.items_30d,
+            images: row.images_30d,
+            videos: row.videos_30d,
+          },
+        },
+      });
     }
 
     // ---------- Tạo mới ----------
