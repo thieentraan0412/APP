@@ -1,10 +1,21 @@
 import type { ReactNode } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { UsageStats } from "../lib/api";
 
 interface Props {
   stats: UsageStats | null;
   loading: boolean;
   onRefresh: () => void;
+}
+
+// Link Cloudflare mở thẳng đúng account/dịch vụ cho dễ bấm (mở bằng openUrl để bật
+// trình duyệt ngoài — <a target="_blank"> trong app Tauri thường không mở được).
+const CF_ACCOUNT = "238081236ed2681c74bf7687ee55f0ee";
+const CF_DASH = `https://dash.cloudflare.com/${CF_ACCOUNT}`;
+const CF_R2 = `${CF_DASH}/r2/default/buckets/captures`;
+const CF_D1 = `${CF_DASH}/workers/d1/databases/1df501ed-4f9a-4cba-ae6c-c0f35bc9b66e`;
+function openExternal(url: string) {
+  openUrl(url).catch(() => {});
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -217,7 +228,11 @@ export function UsageScreen({ stats, loading, onRefresh }: Props) {
             <h3>Ba chỉ số không thể suy ra từ dữ liệu đang lưu</h3>
             <p>Workers requests ({formatNumber(LIMITS.workersRequests)}/ngày), R2 Class A ({formatNumber(LIMITS.r2ClassA)}/tháng), R2 Class B ({formatNumber(LIMITS.r2ClassB)}/tháng) và tổng D1 rows/ngày cần Cloudflare Analytics. App không còn bịa số từ số lượng file; hãy đối chiếu các metric vận hành này trong Dashboard.</p>
           </div>
-          <a href="https://dash.cloudflare.com" target="_blank" rel="noreferrer">Mở Cloudflare Dashboard ↗</a>
+          <div className="usage-note-links">
+            <a href={CF_DASH} onClick={(e) => { e.preventDefault(); openExternal(CF_DASH); }}>Cloudflare Dashboard ↗</a>
+            <a href={CF_R2} onClick={(e) => { e.preventDefault(); openExternal(CF_R2); }}>R2 · ảnh/video ↗</a>
+            <a href={CF_D1} onClick={(e) => { e.preventDefault(); openExternal(CF_D1); }}>D1 · database ↗</a>
+          </div>
         </section>
 
         <p className="usage-footnote">Giới hạn theo tài liệu Cloudflare Free cập nhật tháng 08/2026. R2 là số byte thực tế; D1 lấy từ metadata của chính database. Dự báo là ngoại suy, không phải số liệu billing.</p>
@@ -262,7 +277,7 @@ function UsageStyles() {
     .usage-forecast{margin-top:11px;border-radius:14px;padding:17px 18px;display:grid;grid-template-columns:1.15fr 1fr 1fr;gap:14px;align-items:stretch;background:linear-gradient(130deg,#eef2ff,#f5f3ff 55%,#eff6ff);border:1px solid #dfe4ff}.usage-forecast-intro span,.usage-eyebrow{font-size:9.5px;letter-spacing:.13em;color:#6366f1;font-weight:800}.usage-forecast h2,.usage-service-card h2,.usage-history-card h2{font-size:15px;margin:4px 0 0;letter-spacing:-.015em}.usage-forecast-intro p{font-size:11px;color:#747b89;line-height:1.45;margin:5px 0 0;max-width:310px}.usage-forecast-item{background:rgba(255,255,255,.8);border:1px solid rgba(199,210,254,.75);border-radius:10px;padding:12px 13px;display:flex;flex-direction:column;justify-content:center;gap:9px}.usage-forecast-item>div{display:flex;justify-content:space-between;gap:8px;font-size:11.5px}.usage-forecast-item span{color:#8b92a0}.usage-forecast-item>strong{font-size:12px}
     .usage-services-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;margin-top:11px}.usage-service-card,.usage-history-card{background:#fff;border:1px solid #e4e7eb;border-radius:14px;padding:17px 18px;box-shadow:0 1px 3px rgba(15,23,42,.03)}.usage-card-head{display:flex;align-items:flex-start;justify-content:space-between}.usage-live{font-size:10px;color:#16803d;background:#edfdf3;border:1px solid #c8f2d5;padding:3px 7px;border-radius:99px;font-weight:700}.usage-live i{display:inline-block;width:5px;height:5px;border-radius:50%;background:#22c55e;margin-right:4px}.usage-limit-head{display:flex;align-items:baseline;justify-content:space-between;margin-top:18px;font-size:12px}.usage-limit-head strong{font-size:18px;letter-spacing:-.02em}.usage-limit-head span{color:#9aa1ac;margin-left:3px}.usage-limit-head>b{font-size:12px}.usage-progress{height:7px;border-radius:99px;background:#eef0f3;overflow:hidden;margin-top:8px}.usage-progress>div{height:100%;border-radius:99px;min-width:2px;transition:width .45s ease}.usage-data-list{margin-top:14px;border-top:1px solid #f0f1f3}.usage-data-row{min-height:43px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid #f0f1f3;font-size:11.5px}.usage-data-row>div{display:flex;flex-direction:column;gap:2px;color:#555e6d}.usage-data-row small{font-size:9.5px;color:#a1a7b1}.usage-data-row strong{font-size:11.5px;color:#252a34;white-space:nowrap;font-variant-numeric:tabular-nums}
     .usage-history-card{margin-top:11px;display:grid;grid-template-columns:180px 1fr;align-items:center}.usage-history-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.usage-history-period{background:#f8f9fb;border:1px solid #eceef1;border-radius:9px;padding:10px 12px;display:flex;flex-direction:column;gap:3px}.usage-history-period span{font-size:10px;color:#8d95a1}.usage-history-period strong{font-size:14px}.usage-history-period small{font-size:9.5px;color:#9ca3af}
-    .usage-analytics-note{margin-top:11px;background:#fffaf0;border:1px solid #fde5ad;border-radius:12px;padding:13px 15px;display:grid;grid-template-columns:25px 1fr auto;gap:11px;align-items:center}.usage-note-icon{width:21px;height:21px;border-radius:50%;display:grid;place-items:center;background:#f59e0b;color:#fff;font-weight:800;font-size:12px}.usage-analytics-note h3{font-size:12px;margin:0;color:#7c4a03}.usage-analytics-note p{font-size:10.5px;line-height:1.45;color:#9a6817;margin:3px 0 0}.usage-analytics-note a{font-size:10.5px;color:#7c4a03;font-weight:700;text-decoration:none;white-space:nowrap;border:1px solid #f5cf78;border-radius:8px;padding:7px 9px;background:#fff}.usage-footnote{text-align:center;color:#a4aab3;font-size:9.5px;margin:10px 0 0}.usage-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#737b88}.usage-empty-icon{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:#eef2ff;color:#4f46e5;font-size:20px}.usage-empty h2{font-size:16px;margin:12px 0 4px;color:#333944}.usage-empty p{font-size:11.5px;margin:0 0 14px}.usage-spin{display:inline-block;animation:usage-spin .8s linear infinite}@keyframes usage-spin{to{transform:rotate(360deg)}}
+    .usage-analytics-note{margin-top:11px;background:#fffaf0;border:1px solid #fde5ad;border-radius:12px;padding:13px 15px;display:grid;grid-template-columns:25px 1fr auto;gap:11px;align-items:center}.usage-note-icon{width:21px;height:21px;border-radius:50%;display:grid;place-items:center;background:#f59e0b;color:#fff;font-weight:800;font-size:12px}.usage-analytics-note h3{font-size:12px;margin:0;color:#7c4a03}.usage-analytics-note p{font-size:10.5px;line-height:1.45;color:#9a6817;margin:3px 0 0}.usage-note-links{display:flex;flex-direction:column;gap:6px}.usage-analytics-note a{font-size:10.5px;color:#7c4a03;font-weight:700;text-decoration:none;white-space:nowrap;border:1px solid #f5cf78;border-radius:8px;padding:7px 9px;background:#fff;text-align:center;cursor:pointer}.usage-analytics-note a:hover{background:#fff7e6}.usage-footnote{text-align:center;color:#a4aab3;font-size:9.5px;margin:10px 0 0}.usage-empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#737b88}.usage-empty-icon{width:42px;height:42px;border-radius:13px;display:grid;place-items:center;background:#eef2ff;color:#4f46e5;font-size:20px}.usage-empty h2{font-size:16px;margin:12px 0 4px;color:#333944}.usage-empty p{font-size:11.5px;margin:0 0 14px}.usage-spin{display:inline-block;animation:usage-spin .8s linear infinite}@keyframes usage-spin{to{transform:rotate(360deg)}}
     @media(max-width:950px){.usage-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.usage-forecast{grid-template-columns:1fr 1fr}.usage-forecast-intro{grid-column:1/-1}.usage-services-grid{grid-template-columns:1fr}.usage-history-card{grid-template-columns:1fr;gap:12px}}
   `}</style>;
 }
