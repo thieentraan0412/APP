@@ -295,14 +295,29 @@ function App() {
     };
   }, []);
 
-  // Tải phím tắt đã lưu và áp dụng khi mở app (không cần đăng nhập)
+  // Tải phím tắt đã lưu và áp dụng khi mở app (không cần đăng nhập).
+  // Rust đã tự đăng ký phím đã lưu ngay lúc khởi động; đây là lớp dự phòng + để đồng bộ
+  // cho người dùng cũ (localStorage có nhưng file cấu hình Rust chưa có). WebView2 hay
+  // treo/rớt lời gọi IPC ĐẦU TIÊN → thử lại vài lần thay vì nuốt lỗi im lặng.
   useEffect(() => {
+    let cancelled = false;
+    let cfg = DEFAULT_SHORTCUTS;
     try {
       const saved = localStorage.getItem("shortcuts");
-      const cfg = { ...DEFAULT_SHORTCUTS, ...(saved ? JSON.parse(saved) : {}) };
-      setShortcuts(cfg);
-      invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region, pause: cfg.pause }).catch(() => {});
+      cfg = { ...DEFAULT_SHORTCUTS, ...(saved ? JSON.parse(saved) : {}) };
     } catch {}
+    setShortcuts(cfg);
+    (async () => {
+      for (let i = 0; i < 5 && !cancelled; i++) {
+        try {
+          await invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region, pause: cfg.pause });
+          return; // đăng ký xong (Rust cũng đã ghi file cho lần mở sau)
+        } catch {
+          await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Kiểm tra phiên đăng nhập đã lưu khi mở app (token còn hạn?)

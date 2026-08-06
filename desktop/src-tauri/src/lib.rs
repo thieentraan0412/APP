@@ -25,6 +25,32 @@ const DEFAULT_REGION:  &str = "CommandOrControl+Shift+3";
 // Tạm dừng / quay tiếp khi đang quay video. Cố định (không sửa trong Cài đặt).
 const DEFAULT_PAUSE:   &str = "CommandOrControl+Shift+H";
 
+// Lưu phím tắt phía Rust (file config) để đăng ký NGAY lúc khởi động, không phụ thuộc
+// vào IPC từ frontend (lời gọi đầu tiên của WebView2 hay treo/rớt → phím tùy chỉnh
+// không được đăng ký cho tới khi người dùng vào Cài đặt bấm "Lưu"). 4 dòng: cap/rec/reg/pause.
+fn shortcuts_file(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("shortcuts.cfg"))
+}
+
+fn load_saved_shortcuts(app: &AppHandle) -> Option<(String, String, String, String)> {
+    let content = std::fs::read_to_string(shortcuts_file(app)?).ok()?;
+    let lines: Vec<&str> = content.lines().map(|l| l.trim()).collect();
+    if lines.len() >= 4 && lines.iter().take(4).all(|l| !l.is_empty()) {
+        Some((lines[0].to_string(), lines[1].to_string(), lines[2].to_string(), lines[3].to_string()))
+    } else {
+        None
+    }
+}
+
+fn save_shortcuts_file(app: &AppHandle, capture: &str, record: &str, region: &str, pause: &str) {
+    if let Some(p) = shortcuts_file(app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, format!("{}\n{}\n{}\n{}\n", capture, record, region, pause));
+    }
+}
+
 fn trigger_capture(app: &AppHandle) {
     // H2: đang chụp vùng (overlay mở) → bỏ qua chụp full để không tráo kết quả
     // giữa ảnh full và ảnh vùng / dò QR.
@@ -75,7 +101,10 @@ fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str, p
 
 #[tauri::command]
 fn set_shortcuts(app: AppHandle, capture: String, record: String, region: String, pause: String) -> Result<(), String> {
-    apply_shortcuts(&app, &capture, &record, &region, &pause)
+    apply_shortcuts(&app, &capture, &record, &region, &pause)?;
+    // Ghi lại để lần khởi động sau đăng ký đúng phím tùy chỉnh ngay từ đầu.
+    save_shortcuts_file(&app, &capture, &record, &region, &pause);
+    Ok(())
 }
 
 #[tauri::command]
@@ -164,7 +193,12 @@ pub fn run() {
                 }
             }
 
-            let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION, DEFAULT_PAUSE);
+            // Đăng ký NGAY phím tắt đã lưu (nếu có) — dùng được liền khi mở app, không cần
+            // vào Cài đặt bấm "Lưu". Chưa lưu bao giờ → dùng mặc định.
+            match load_saved_shortcuts(app.handle()) {
+                Some((c, r, g, p)) => { let _ = apply_shortcuts(app.handle(), &c, &r, &g, &p); }
+                None => { let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION, DEFAULT_PAUSE); }
+            }
 
             let capture_i = MenuItem::with_id(app, "capture", "Chụp màn hình", true, None::<&str>)?;
             let region_i  = MenuItem::with_id(app, "region",  "Chụp vùng",     true, None::<&str>)?;
