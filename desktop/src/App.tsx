@@ -32,7 +32,7 @@ import "./App.css";
 
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage";
 
-const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3", pause: "Control+Shift+H" };
+const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3", pause: "Control+Shift+H", regionRecord: "Control+Shift+4" };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
 
 const SidebarS = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
@@ -51,8 +51,9 @@ function checkUsageWarnings(stats: UsageStats): string[] {
   return warns;
 }
 
-function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, onRecord, onUsage, onSettings, recording, usageWarnings }: {
+function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, onRecord, onRegionRecord, onUsage, onSettings, recording, usageWarnings }: {
   screen: Screen; onHome: () => void; onCapture: () => void; onRegionCapture: () => void; onQrScan: () => void; onRecord: () => void;
+  onRegionRecord: () => void;
   onUsage: () => void; onSettings: () => void; recording: boolean; usageWarnings: string[];
 }) {
   const hasWarn = usageWarnings.length > 0;
@@ -77,6 +78,13 @@ function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, o
       </button>
       <button className={`lib-tool${recording ? " lib-tool--recording" : ""}`} onClick={onRecord} title="Quay / dừng video">
         <svg {...SidebarS}><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m22 8-6 4 6 4V8Z"/></svg>
+      </button>
+      {/* Vô hiệu khi đang quay: một phiên quay chỉ có một vùng, chọn vùng mới lúc này vô nghĩa. */}
+      <button className="lib-tool" onClick={onRegionRecord} disabled={recording} title="Quay video theo vùng chọn">
+        <svg {...SidebarS}>
+          <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+          <path d="M10 9.2v5.6l5-2.8-5-2.8Z" fill="currentColor" stroke="none"/>
+        </svg>
       </button>
       <div className="lib-spacer"/>
       <button
@@ -310,7 +318,7 @@ function App() {
     (async () => {
       for (let i = 0; i < 5 && !cancelled; i++) {
         try {
-          await invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region, pause: cfg.pause });
+          await invoke("set_shortcuts", { capture: cfg.capture, record: cfg.record, region: cfg.region, pause: cfg.pause, regionRecord: cfg.regionRecord });
           return; // đăng ký xong (Rust cũng đã ghi file cho lần mở sau)
         } catch {
           await new Promise((r) => setTimeout(r, 500 * (i + 1)));
@@ -459,6 +467,10 @@ function App() {
 
   function manualRegionCapture() {
     invoke("start_region_capture").catch(() => {});
+  }
+
+  function manualRegionRecord() {
+    invoke("start_region_record").catch(() => {});
   }
 
   async function manualCapture() {
@@ -787,10 +799,10 @@ function App() {
     }
   }
 
-  async function onSaveShortcuts(capture: string, record: string, region: string, pause: string) {
-    // H8: 4 phím tắt phải KHÁC nhau. Nếu trùng, khi Rust đăng ký sẽ lỗi giữa chừng
+  async function onSaveShortcuts(capture: string, record: string, region: string, pause: string, regionRecord: string) {
+    // H8: các phím tắt phải KHÁC nhau. Nếu trùng, khi Rust đăng ký sẽ lỗi giữa chừng
     // (sau khi đã gỡ hết phím cũ) → mọi phím tắt toàn cục chết tới khi khởi động lại.
-    const entries: [string, string][] = [["Chụp", capture], ["Quay", record], ["Chụp vùng", region], ["Tạm dừng", pause]];
+    const entries: [string, string][] = [["Chụp", capture], ["Quay", record], ["Chụp vùng", region], ["Tạm dừng", pause], ["Quay vùng", regionRecord]];
     for (let i = 0; i < entries.length; i++) {
       for (let j = i + 1; j < entries.length; j++) {
         if (entries[i][1] === entries[j][1]) {
@@ -800,8 +812,8 @@ function App() {
       }
     }
     try {
-      await invoke("set_shortcuts", { capture, record, region, pause });
-      const cfg = { capture, record, region, pause };
+      await invoke("set_shortcuts", { capture, record, region, pause, regionRecord });
+      const cfg = { capture, record, region, pause, regionRecord };
       setShortcuts(cfg);
       localStorage.setItem("shortcuts", JSON.stringify(cfg));
       showToast("Đã lưu phím tắt");
@@ -996,6 +1008,7 @@ function App() {
           onRegionCapture={manualRegionCapture}
           onQrScan={triggerQrScan}
           onRecord={toggleRecord}
+          onRegionRecord={manualRegionRecord}
           onUsage={openUsage}
           onSettings={() => setScreen("settings")}
           recording={recording}
@@ -1060,6 +1073,7 @@ function App() {
               record={shortcuts.record}
               region={shortcuts.region}
               pause={shortcuts.pause}
+              regionRecord={shortcuts.regionRecord}
               onSave={onSaveShortcuts}
               onBack={backHome}
               onCheckUpdate={manualCheckUpdate}

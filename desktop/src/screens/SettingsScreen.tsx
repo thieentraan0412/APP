@@ -6,7 +6,8 @@ interface Props {
   record: string;
   region: string;
   pause: string;
-  onSave: (capture: string, record: string, region: string, pause: string) => void;
+  regionRecord: string;
+  onSave: (capture: string, record: string, region: string, pause: string, regionRecord: string) => void;
   onBack: () => void;
   onCheckUpdate: () => void;
   updateChecking: boolean;
@@ -95,11 +96,12 @@ function ShortcutCapture({
   );
 }
 
-export function SettingsScreen({ capture, record, region, pause, onSave, onBack, onCheckUpdate, updateChecking, userEmail, onLogout }: Props) {
+export function SettingsScreen({ capture, record, region, pause, regionRecord, onSave, onBack, onCheckUpdate, updateChecking, userEmail, onLogout }: Props) {
   const [cap, setCap] = useState(capture);
   const [rec, setRec] = useState(record);
   const [reg, setReg] = useState(region);
   const [pau, setPau] = useState(pause);
+  const [recReg, setRecReg] = useState(regionRecord);
 
   // Tự khởi động cùng máy — đọc trạng thái thật từ hệ điều hành khi mở Cài đặt.
   const [autostart, setAutostart] = useState(false);
@@ -154,10 +156,11 @@ export function SettingsScreen({ capture, record, region, pause, onSave, onBack,
             <ShortcutCapture label="Chụp ảnh" value={cap} onChange={setCap} />
             <ShortcutCapture label="Chụp vùng màn hình" value={reg} onChange={setReg} />
             <ShortcutCapture label="Quay / dừng video" value={rec} onChange={setRec} />
+            <ShortcutCapture label="Quay vùng màn hình" value={recReg} onChange={setRecReg} />
             <ShortcutCapture label="Tạm dừng / quay tiếp" value={pau} onChange={setPau} />
           </div>
           <div className="settings-card-footer">
-            <button className="primary" onClick={() => onSave(cap, rec, reg, pau)}>
+            <button className="primary" onClick={() => onSave(cap, rec, reg, pau, recReg)}>
               Lưu phím tắt
             </button>
             <button
@@ -166,6 +169,7 @@ export function SettingsScreen({ capture, record, region, pause, onSave, onBack,
                 setReg("Control+Shift+3");
                 setRec("Control+Shift+2");
                 setPau("Control+Shift+H");
+                setRecReg("Control+Shift+4");
               }}
             >
               Khôi phục mặc định

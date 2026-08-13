@@ -34,6 +34,22 @@
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AsyncDns --disable-quic --no-proxy-server --dns-over-https-mode=off"
       },
       {
+        "label": "rec_border",
+        "title": "",
+        "url": "/",
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "shadow": false,
+        "width": 100,
+        "height": 100,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AsyncDns --disable-quic --no-proxy-server --dns-over-https-mode=off"
+      },
+      {
         "label": "region_selector",
         "title": "",
         "url": "/",

@@ -1,13 +1,14 @@
-// Quay toàn màn hình bằng ffmpeg (tải runtime, không bundle) qua gdigrab.
+// Quay màn hình bằng ffmpeg (tải runtime, không bundle) qua gdigrab.
 // - Phím tắt Quay lần 1 → bắt đầu; lần 2 → dừng sạch (gửi 'q') → báo frontend đường dẫn mp4.
 // - Tạm dừng/Tiếp tục: ffmpeg gdigrab KHÔNG pause tại chỗ được, nên quay theo TỪNG ĐOẠN.
 //   Tạm dừng = kết thúc đoạn hiện tại; quay tiếp = mở đoạn mới; dừng hẳn = NỐI các đoạn
 //   lại thành 1 mp4 liền mạch (bỏ hẳn khoảng tạm dừng).
+// - Quay VÙNG: cùng đường đi, chỉ khác là mỗi đoạn được cắt bằng bộ lọc `crop` (xem Crop).
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, LogicalPosition, Manager};
+use tauri::{AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, PhysicalSize};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -17,6 +18,23 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[derive(Default)]
 pub struct RecState {
     inner: Mutex<Session>,
+}
+
+// Vùng cần quay, lưu theo TỈ LỆ (0..1) của khung hình gdigrab thu được — KHÔNG phải toạ độ
+// pixel. Lý do: ffmpeg.exe không khai báo DPI-aware, nên trên màn hình scale 125%/150%
+// Windows trả cho nó một desktop đã bị thu nhỏ; toạ độ pixel sẽ lệch còn tỉ lệ thì không.
+#[derive(Clone, Copy, Debug)]
+pub struct Crop {
+    pub fx: f64,
+    pub fy: f64,
+    pub fw: f64,
+    pub fh: f64,
+    // Cùng vùng đó nhưng theo pixel vật lý trên màn hình (gốc = màn hình chính).
+    // CHỈ dùng để đặt khung viền báo đang quay — không dính gì tới việc cắt video.
+    pub sx: i32,
+    pub sy: i32,
+    pub sw: u32,
+    pub sh: u32,
 }
 
 #[derive(Default)]
@@ -31,6 +49,15 @@ struct Session {
     stdin: Option<ChildStdin>,   // stdin để gửi 'q' kết thúc đoạn
     segments: Vec<PathBuf>,      // các đoạn đã kết thúc, chờ nối
     seg_index: usize,            // số thứ tự đoạn đang quay
+    // Vùng đang quay (None = toàn màn hình). PHẢI giữ trong suốt phiên quay: đoạn mở
+    // sau khi "quay tiếp" cắt sai vùng sẽ khác độ phân giải đoạn trước → nối bằng
+    // `-c copy` thất bại, mất trắng bản quay.
+    crop: Option<Crop>,
+}
+
+// Đang quay hay không — để chặn mở lớp chọn vùng đè lên một phiên quay đang chạy.
+pub fn is_recording(app: &AppHandle) -> bool {
+    app.state::<RecState>().inner.lock().unwrap().recording
 }
 
 fn seg_path(index: usize) -> PathBuf {
@@ -39,22 +66,47 @@ fn seg_path(index: usize) -> PathBuf {
 
 // Spawn ffmpeg quay 1 đoạn ra file `out`. Thử lại nhiều lần vì ngay sau khi tải,
 // Windows Defender có thể đang quét & khóa ffmpeg.exe (os error 32).
-fn spawn_segment(app: &AppHandle, ffmpeg: &PathBuf, out: &PathBuf) -> Result<Child, String> {
+fn spawn_segment(
+    app: &AppHandle,
+    ffmpeg: &PathBuf,
+    out: &PathBuf,
+    crop: Option<&Crop>,
+) -> Result<Child, String> {
     let out_str = out.to_string_lossy().to_string();
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-f".into(), "gdigrab".into(),
+        "-framerate".into(), "24".into(), // 24fps cho nhẹ
+        "-i".into(), "desktop".into(),
+    ];
+    // Quay vùng → cắt theo tỉ lệ khung hình gdigrab thu được (in_w/in_h do ffmpeg tự biết),
+    // nên không cần đoán độ phân giải thật của desktop.
+    // - Kích thước dùng round() TRƯỚC: tỉ lệ in ra 8 chữ số nên in_w*fw ra 639.9994 chứ
+    //   không tròn 640; floor thẳng sẽ ăn bớt 2px của mọi vùng chọn.
+    // - floor(../2)*2 vì libx264 + yuv420p BẮT BUỘC cạnh chẵn — kích thước lẻ (người dùng
+    //   kéo được 1281×721) làm ffmpeg chết ngay khi khởi động.
+    // - Toạ độ dùng floor() (KHÔNG round) để bảo đảm x+w <= in_w: x <= in*fx và
+    //   w <= in*fw + 0.5, nên x+w <= in + 0.5; x, w nguyên ⇒ x+w <= in. Nếu round cả hai
+    //   thì vùng sát mép phải có thể tràn 1px và ffmpeg từ chối cả phiên quay.
+    if let Some(c) = crop {
+        args.push("-vf".into());
+        args.push(format!(
+            "crop=floor(round(in_w*{fw:.8})/2)*2:floor(round(in_h*{fh:.8})/2)*2:floor(in_w*{fx:.8}):floor(in_h*{fy:.8})",
+            fw = c.fw, fh = c.fh, fx = c.fx, fy = c.fy,
+        ));
+    }
+    args.extend([
+        "-c:v".into(), "libx264".into(),
+        "-preset".into(), "ultrafast".into(), // không delay khi record
+        "-crf".into(), "28".into(),           // cân bằng chất/nặng
+        "-pix_fmt".into(), "yuv420p".into(),
+        "-movflags".into(), "+faststart".into(),
+        out_str,
+    ]);
+
     let mut command = Command::new(ffmpeg);
     command
-        .args([
-            "-y",
-            "-f", "gdigrab",
-            "-framerate", "24",       // 24fps cho nhẹ
-            "-i", "desktop",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",   // không delay khi record
-            "-crf", "28",             // cân bằng chất/nặng
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            out_str.as_str(),
-        ])
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -84,6 +136,11 @@ pub fn toggle_recording(app: &AppHandle) {
         if s.busy {
             return; // đang khởi động dở → bỏ qua, tránh spawn ffmpeg trùng (H5)
         }
+        // Lớp chọn vùng đang mở → phím tắt/tray "Quay" sẽ quay nhầm cả lớp overlay vào
+        // video. Bỏ qua; người dùng chọn xong vùng (hoặc Esc) rồi hãy quay.
+        if !s.recording && crate::capture::region_active(app) {
+            return;
+        }
         if !s.recording {
             s.busy = true; // khoá re-entrancy TRƯỚC khi start() spawn ffmpeg
         }
@@ -92,8 +149,21 @@ pub fn toggle_recording(app: &AppHandle) {
     if recording {
         stop(app);
     } else {
-        start(app);
+        start(app, None); // None = quay toàn màn hình
     }
+}
+
+// Bắt đầu quay THEO VÙNG. Gọi sau khi lớp chọn vùng đã ẩn hẳn khỏi màn hình.
+pub fn start_region_recording(app: &AppHandle, crop: Crop) {
+    {
+        let st = app.state::<RecState>();
+        let mut s = st.inner.lock().unwrap();
+        if s.busy || s.recording {
+            return;
+        }
+        s.busy = true; // khoá re-entrancy TRƯỚC khi start() spawn ffmpeg (H5)
+    }
+    start(app, Some(crop));
 }
 
 // Ctrl+Shift+H: chỉ có tác dụng khi đang quay — đảo giữa tạm dừng và quay tiếp.
@@ -115,7 +185,7 @@ pub fn toggle_pause(app: &AppHandle) {
     }
 }
 
-fn start(app: &AppHandle) {
+fn start(app: &AppHandle, crop: Option<Crop>) {
     // Chạy trong thread để không treo UI khi lần đầu tải ffmpeg.
     let app = app.clone();
     std::thread::spawn(move || {
@@ -123,13 +193,16 @@ fn start(app: &AppHandle) {
             Ok(p) => p,
             Err(e) => {
                 clear_busy(&app); // mở khoá re-entrancy khi thất bại (H5)
+                // Quay vùng ẩn cửa sổ chính trước khi quay → phải hiện lại, nếu không
+                // "video-error" phát vào một cửa sổ đang ẩn và người dùng không thấy gì.
+                show_main(&app);
                 let _ = app.emit("video-error", format!("Không chuẩn bị được ffmpeg: {e}"));
                 return;
             }
         };
 
         let out = seg_path(0);
-        match spawn_segment(&app, &ffmpeg, &out) {
+        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref()) {
             Ok(mut child) => {
                 {
                     let st = app.state::<RecState>();
@@ -141,13 +214,22 @@ fn start(app: &AppHandle) {
                     s.ffmpeg = Some(ffmpeg);
                     s.segments = Vec::new();
                     s.seg_index = 0;
+                    s.crop = crop;
                     s.busy = false; // khởi động xong
                 }
                 let _ = app.emit("recording-started", ());
-                show_notify(&app);
+                match &crop {
+                    // Quay vùng: KHÔNG hiện popup báo — nó nằm giữa màn hình nên sẽ lọt vào
+                    // những khung hình đầu của video nếu vùng chọn trùm qua giữa màn hình.
+                    // Thay bằng khung viền bao quanh vùng (nằm ngoài nên không vào video).
+                    Some(c) => show_border(&app, c),
+                    None => show_notify(&app),
+                }
             }
             Err(last_err) => {
                 clear_busy(&app);
+                hide_border(&app);
+                show_main(&app); // xem lý do ở nhánh lỗi ffmpeg phía trên
                 let _ = app.emit("video-error", format!("Không quay được: {last_err}"));
             }
         }
@@ -195,13 +277,14 @@ fn resume(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let st = app.state::<RecState>();
-        let (ffmpeg, new_index) = {
+        let (ffmpeg, new_index, crop) = {
             let mut s = st.inner.lock().unwrap();
             if !s.recording || !s.paused {
                 s.busy = false; // (H5)
                 return;
             }
-            (s.ffmpeg.clone(), s.seg_index + 1)
+            // Giữ nguyên vùng của phiên quay → mọi đoạn cùng độ phân giải để nối được.
+            (s.ffmpeg.clone(), s.seg_index + 1, s.crop)
         };
         let ffmpeg = match ffmpeg {
             Some(f) => f,
@@ -211,7 +294,7 @@ fn resume(app: &AppHandle) {
             }
         };
         let out = seg_path(new_index);
-        match spawn_segment(&app, &ffmpeg, &out) {
+        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref()) {
             Ok(mut child) => {
                 {
                     let mut s = st.inner.lock().unwrap();
@@ -245,6 +328,7 @@ fn stop(app: &AppHandle) {
     if let Some(notify) = app.get_webview_window("rec_notify") {
         let _ = notify.hide();
     }
+    hide_border(app);
     show_main(app);
 
     // Kết thúc đoạn cuối + nối tất cả đoạn trong thread (child.wait + ffmpeg concat có thể lâu).
@@ -276,6 +360,7 @@ fn stop(app: &AppHandle) {
         {
             let mut s = st.inner.lock().unwrap();
             s.paused = false;
+            s.crop = None; // phiên quay kết thúc → lần quay sau mặc định toàn màn hình
         }
 
         // Tên duy nhất mỗi lần quay (theo timestamp) — tránh trùng với file của lần
@@ -357,6 +442,33 @@ fn finalize(
     }
     let _ = std::fs::remove_file(&list_path);
     Ok(out.clone())
+}
+
+// Khoảng hở giữa vùng quay và cửa sổ khung viền, tính bằng pixel VẬT LÝ.
+// Nét viền 2px CSS ăn tối đa 4px vật lý (phóng to 200%), còn vùng ffmpeg cắt có thể lệch
+// thêm 1px do làm tròn xuống chẵn → 6 cho dư 1-2px, bảo đảm không nét nào lọt vào video.
+const BORDER_GAP: i32 = 6;
+
+// Hiện khung viền bao quanh (KHÔNG đè lên) vùng đang quay.
+fn show_border(app: &AppHandle, c: &Crop) {
+    let Some(win) = app.get_webview_window("rec_border") else { return };
+    let g = BORDER_GAP;
+    let _ = win.set_position(PhysicalPosition::new(c.sx - g, c.sy - g));
+    let _ = win.set_size(PhysicalSize::new(
+        c.sw + (g as u32) * 2,
+        c.sh + (g as u32) * 2,
+    ));
+    // Click xuyên qua: khung viền chỉ để nhìn, không được chặn thao tác của người dùng
+    // với ứng dụng đang nằm dưới nó suốt thời gian quay.
+    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.show();
+    let _ = win.set_always_on_top(true);
+}
+
+fn hide_border(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("rec_border") {
+        let _ = win.hide();
+    }
 }
 
 // Hiện cửa sổ thông báo nhỏ ở giữa màn hình, tự ẩn sau 500ms.

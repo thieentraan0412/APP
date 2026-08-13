@@ -17,6 +17,7 @@ struct ShortcutCfg {
     record:  Mutex<Option<Shortcut>>,
     region:  Mutex<Option<Shortcut>>,
     pause:   Mutex<Option<Shortcut>>,
+    recreg:  Mutex<Option<Shortcut>>,
 }
 
 const DEFAULT_CAPTURE: &str = "CommandOrControl+Shift+1";
@@ -24,6 +25,8 @@ const DEFAULT_RECORD:  &str = "CommandOrControl+Shift+2";
 const DEFAULT_REGION:  &str = "CommandOrControl+Shift+3";
 // Tạm dừng / quay tiếp khi đang quay video. Cố định (không sửa trong Cài đặt).
 const DEFAULT_PAUSE:   &str = "CommandOrControl+Shift+H";
+// Quay video theo vùng chọn.
+const DEFAULT_RECREG:  &str = "CommandOrControl+Shift+4";
 
 // Lưu phím tắt phía Rust (file config) để đăng ký NGAY lúc khởi động, không phụ thuộc
 // vào IPC từ frontend (lời gọi đầu tiên của WebView2 hay treo/rớt → phím tùy chỉnh
@@ -32,22 +35,38 @@ fn shortcuts_file(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("shortcuts.cfg"))
 }
 
-fn load_saved_shortcuts(app: &AppHandle) -> Option<(String, String, String, String)> {
+fn load_saved_shortcuts(app: &AppHandle) -> Option<(String, String, String, String, String)> {
     let content = std::fs::read_to_string(shortcuts_file(app)?).ok()?;
     let lines: Vec<&str> = content.lines().map(|l| l.trim()).collect();
     if lines.len() >= 4 && lines.iter().take(4).all(|l| !l.is_empty()) {
-        Some((lines[0].to_string(), lines[1].to_string(), lines[2].to_string(), lines[3].to_string()))
+        // Dòng 5 (quay vùng) mới có từ bản này — người dùng cũ có file 4 dòng, thiếu thì
+        // lấy mặc định chứ KHÔNG coi cả file là hỏng (làm vậy sẽ reset hết phím họ đã đặt).
+        let recreg = lines
+            .get(4)
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .unwrap_or_else(|| DEFAULT_RECREG.to_string());
+        Some((
+            lines[0].to_string(),
+            lines[1].to_string(),
+            lines[2].to_string(),
+            lines[3].to_string(),
+            recreg,
+        ))
     } else {
         None
     }
 }
 
-fn save_shortcuts_file(app: &AppHandle, capture: &str, record: &str, region: &str, pause: &str) {
+fn save_shortcuts_file(app: &AppHandle, capture: &str, record: &str, region: &str, pause: &str, recreg: &str) {
     if let Some(p) = shortcuts_file(app) {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, format!("{}\n{}\n{}\n{}\n", capture, record, region, pause));
+        let _ = std::fs::write(
+            p,
+            format!("{}\n{}\n{}\n{}\n{}\n", capture, record, region, pause, recreg),
+        );
     }
 }
 
@@ -76,11 +95,16 @@ fn trigger_region_capture(app: &AppHandle) {
     capture::begin_region_capture(app.clone());
 }
 
-fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str, pause: &str) -> Result<(), String> {
+fn trigger_region_record(app: &AppHandle) {
+    capture::begin_region_selection(app.clone(), true);
+}
+
+fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str, pause: &str, recreg: &str) -> Result<(), String> {
     let cap = Shortcut::from_str(capture).map_err(|e| e.to_string())?;
     let rec = Shortcut::from_str(record).map_err(|e| e.to_string())?;
     let reg = Shortcut::from_str(region).map_err(|e| e.to_string())?;
     let pause = Shortcut::from_str(pause).map_err(|e| e.to_string())?;
+    let recreg = Shortcut::from_str(recreg).map_err(|e| e.to_string())?;
 
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
@@ -90,20 +114,22 @@ fn apply_shortcuts(app: &AppHandle, capture: &str, record: &str, region: &str, p
     let _ = gs.register(rec.clone());
     let _ = gs.register(reg.clone());
     let _ = gs.register(pause.clone());
+    let _ = gs.register(recreg.clone());
 
     let st = app.state::<ShortcutCfg>();
     *st.capture.lock().unwrap() = Some(cap);
     *st.record.lock().unwrap()  = Some(rec);
     *st.region.lock().unwrap()  = Some(reg);
     *st.pause.lock().unwrap()   = Some(pause);
+    *st.recreg.lock().unwrap()  = Some(recreg);
     Ok(())
 }
 
 #[tauri::command]
-fn set_shortcuts(app: AppHandle, capture: String, record: String, region: String, pause: String) -> Result<(), String> {
-    apply_shortcuts(&app, &capture, &record, &region, &pause)?;
+fn set_shortcuts(app: AppHandle, capture: String, record: String, region: String, pause: String, region_record: String) -> Result<(), String> {
+    apply_shortcuts(&app, &capture, &record, &region, &pause, &region_record)?;
     // Ghi lại để lần khởi động sau đăng ký đúng phím tùy chỉnh ngay từ đầu.
-    save_shortcuts_file(&app, &capture, &record, &region, &pause);
+    save_shortcuts_file(&app, &capture, &record, &region, &pause, &region_record);
     Ok(())
 }
 
@@ -173,6 +199,7 @@ pub fn run() {
                     let is_rec = st.record.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
                     let is_reg = st.region.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
                     let is_pause = st.pause.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
+                    let is_recreg = st.recreg.lock().unwrap().as_ref().map_or(false, |s| s == shortcut);
                     if is_cap {
                         trigger_capture(app);
                     } else if is_rec {
@@ -181,6 +208,8 @@ pub fn run() {
                         trigger_region_capture(app);
                     } else if is_pause {
                         record::toggle_pause(app);
+                    } else if is_recreg {
+                        trigger_region_record(app);
                     }
                 })
                 .build(),
@@ -196,17 +225,18 @@ pub fn run() {
             // Đăng ký NGAY phím tắt đã lưu (nếu có) — dùng được liền khi mở app, không cần
             // vào Cài đặt bấm "Lưu". Chưa lưu bao giờ → dùng mặc định.
             match load_saved_shortcuts(app.handle()) {
-                Some((c, r, g, p)) => { let _ = apply_shortcuts(app.handle(), &c, &r, &g, &p); }
-                None => { let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION, DEFAULT_PAUSE); }
+                Some((c, r, g, p, rg)) => { let _ = apply_shortcuts(app.handle(), &c, &r, &g, &p, &rg); }
+                None => { let _ = apply_shortcuts(app.handle(), DEFAULT_CAPTURE, DEFAULT_RECORD, DEFAULT_REGION, DEFAULT_PAUSE, DEFAULT_RECREG); }
             }
 
             let capture_i = MenuItem::with_id(app, "capture", "Chụp màn hình", true, None::<&str>)?;
             let region_i  = MenuItem::with_id(app, "region",  "Chụp vùng",     true, None::<&str>)?;
             let record_i  = MenuItem::with_id(app, "record",  "Quay / Dừng video", true, None::<&str>)?;
+            let recreg_i  = MenuItem::with_id(app, "recregion", "Quay vùng",    true, None::<&str>)?;
             let pause_i   = MenuItem::with_id(app, "pause",   "Tạm dừng / Quay tiếp", true, None::<&str>)?;
             let show_i    = MenuItem::with_id(app, "show",    "Mở cửa sổ",     true, None::<&str>)?;
             let quit_i    = MenuItem::with_id(app, "quit",    "Thoát",          true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&capture_i, &region_i, &record_i, &pause_i, &show_i, &quit_i])?;
+            let menu = Menu::with_items(app, &[&capture_i, &region_i, &record_i, &recreg_i, &pause_i, &show_i, &quit_i])?;
 
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
@@ -216,6 +246,7 @@ pub fn run() {
                     "capture" => trigger_capture(app),
                     "region"  => trigger_region_capture(app),
                     "record"  => record::toggle_recording(app),
+                    "recregion" => trigger_region_record(app),
                     "pause"   => record::toggle_pause(app),
                     "show" => {
                         if let Some(win) = app.get_webview_window("main") {
@@ -239,7 +270,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             capture::capture_screen,
             capture::start_region_capture,
+            capture::start_region_record,
+            capture::region_mode,
             capture::confirm_region_capture,
+            capture::confirm_region_record,
             capture::cancel_region_capture,
             set_shortcuts,
             remove_temp,
