@@ -7,10 +7,15 @@ CREATE TABLE IF NOT EXISTS items (
   mime        TEXT NOT NULL,         -- 'image/png' | 'video/mp4'
   annotations TEXT,                  -- JSON khung + note (NULL nếu video)
   title       TEXT,                  -- tiêu đề do người dùng đặt (không bắt buộc)
-  created_at  INTEGER NOT NULL       -- thời gian tạo (epoch ms)
+  created_at  INTEGER NOT NULL,      -- thời gian tạo (epoch ms)
+  bytes       INTEGER                -- tổng byte chiếm trên R2 (file gộp + ảnh gốc); NULL = chưa đối chiếu
 );
 
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at);
+
+-- Database đã tạo từ trước bảng này thì chạy thêm (worker cũng tự chạy lần đầu):
+--   ALTER TABLE items ADD COLUMN bytes INTEGER;
+-- rồi bấm "Đồng bộ dung lượng" trong trang Quản lý dữ liệu để điền số liệu cho dữ liệu cũ.
 
 -- Bảng tài khoản người dùng (đăng nhập/đăng ký)
 CREATE TABLE IF NOT EXISTS users (

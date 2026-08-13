@@ -6,12 +6,16 @@
 //   GET  /orig/:id       ảnh GỐC (phục vụ sửa lại annotate)
 //
 // Ghi / quản lý (cần header x-api-key = API_KEY):
-//   POST   /api/upload       tạo mới: file (+ original + annotations) -> R2 + D1 -> { id, url }
-//   GET    /api/items        liệt kê
-//   GET    /api/usage        thống kê toàn bộ R2 + D1 và tốc độ tăng dữ liệu
-//   GET    /api/items/:id    chi tiết (kèm annotations)
-//   PATCH  /api/items/:id    sửa: thay ảnh đã gộp + annotations
-//   DELETE /api/items/:id    xoá: xoá file R2 + bản ghi D1
+//   POST   /api/upload           tạo mới: file (+ original + annotations) -> R2 + D1 -> { id, url }
+//   GET    /api/items            liệt kê
+//   GET    /api/usage            thống kê toàn bộ R2 + D1 và tốc độ tăng dữ liệu
+//   GET    /api/storage          dung lượng theo từng ngày (để quản lý & dọn dữ liệu cũ)
+//   GET    /api/storage/items    danh sách nội dung trong một khoảng thời gian (kèm dung lượng)
+//   POST   /api/storage/sync     đối chiếu dung lượng thật trên R2 + tìm file rác
+//   POST   /api/storage/purge    xoá hàng loạt theo id / khoảng thời gian / file rác
+//   GET    /api/items/:id        chi tiết (kèm annotations)
+//   PATCH  /api/items/:id        sửa: thay ảnh đã gộp + annotations
+//   DELETE /api/items/:id        xoá: xoá file R2 + bản ghi D1
 
 export interface Env {
   BUCKET: R2Bucket;
@@ -176,6 +180,99 @@ async function getR2Usage(bucket: R2Bucket): Promise<R2Usage> {
   return usage;
 }
 
+// ---------- Dung lượng theo thời gian ----------
+// Mỗi bản ghi lưu sẵn tổng số byte đã chiếm trên R2 (cột items.bytes, ghi lúc upload),
+// nhờ vậy thống kê theo ngày/tháng chỉ là truy vấn D1 — không phải quét lại R2 (Class A op).
+// /api/storage/sync dùng để đối chiếu với R2 cho dữ liệu cũ (chưa có bytes) và tìm file rác.
+
+// Cột bytes được thêm sau khi app đã chạy → tự ALTER TABLE lần đầu trong mỗi isolate
+// (D1 không có cơ chế migration tự động ở đây; chạy lại nhiều lần vô hại).
+let bytesColumnPromise: Promise<void> | null = null;
+function ensureBytesColumn(env: Env): Promise<void> {
+  if (!bytesColumnPromise) {
+    bytesColumnPromise = env.DB.prepare("ALTER TABLE items ADD COLUMN bytes INTEGER")
+      .run()
+      .then(() => undefined)
+      .catch((err) => {
+        if (/duplicate column/i.test(String(err))) return; // đã có cột → xong
+        bytesColumnPromise = null; // lỗi khác (mạng/D1) → cho phép thử lại
+        throw err;
+      });
+  }
+  return bytesColumnPromise;
+}
+
+// items/<id>.webp | items/<id>.mp4 | items/<id>_orig.webp  ->  <id>
+function idFromKey(key: string): string | null {
+  if (!key.startsWith("items/")) return null;
+  let name = key.slice("items/".length);
+  if (name.includes("/")) return null;
+  const dot = name.lastIndexOf(".");
+  if (dot > 0) name = name.slice(0, dot);
+  if (name.endsWith("_orig")) name = name.slice(0, -"_orig".length);
+  return name || null;
+}
+
+interface R2ItemScan {
+  perId: Map<string, { bytes: number; keys: string[]; uploadedAt: number }>;
+  objectCount: number;
+  listOperations: number;
+}
+
+// Quét toàn bộ bucket, gom object theo id nội dung (ảnh đã gộp + ảnh gốc tính chung 1 id).
+async function scanR2ByItem(bucket: R2Bucket): Promise<R2ItemScan> {
+  const perId = new Map<string, { bytes: number; keys: string[]; uploadedAt: number }>();
+  let objectCount = 0;
+  let listOperations = 0;
+  let cursor: string | undefined;
+
+  do {
+    const page = await bucket.list({ limit: 1000, cursor });
+    listOperations += 1;
+    for (const object of page.objects) {
+      objectCount += 1;
+      const id = idFromKey(object.key);
+      if (!id) continue; // object ngoài items/ — không đụng tới
+      const uploadedAt = object.uploaded ? object.uploaded.getTime() : 0;
+      const cur = perId.get(id);
+      if (cur) {
+        cur.bytes += object.size;
+        cur.keys.push(object.key);
+        cur.uploadedAt = Math.max(cur.uploadedAt, uploadedAt);
+      } else {
+        perId.set(id, { bytes: object.size, keys: [object.key], uploadedAt });
+      }
+    }
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+
+  return { perId, objectCount, listOperations };
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+// R2 xoá tối đa 1.000 key mỗi lời gọi.
+async function deleteR2Keys(bucket: R2Bucket, keys: string[]): Promise<void> {
+  for (const part of chunk(keys, 1000)) await bucket.delete(part);
+}
+
+// D1 giới hạn số tham số bind mỗi câu lệnh → xoá theo lô nhỏ.
+async function deleteItemRows(env: Env, ids: string[]): Promise<void> {
+  for (const group of chunk(chunk(ids, 50), 20)) {
+    await env.DB.batch(
+      group.map((part) =>
+        env.DB.prepare(
+          `DELETE FROM items WHERE id IN (${part.map(() => "?").join(",")})`
+        ).bind(...part)
+      )
+    );
+  }
+}
+
 // Lấy File từ form (form.get trả về File | string | null)
 function asFile(v: File | string | null): File | null {
   return v && typeof v !== "string" ? v : null;
@@ -238,6 +335,7 @@ interface ItemRow {
   annotations: string | null;
   title: string | null;
   created_at: number;
+  bytes: number | null; // tổng byte trên R2 (ảnh đã gộp + ảnh gốc); NULL = chưa đối chiếu
 }
 
 export default {
@@ -401,10 +499,281 @@ export default {
       });
     }
 
+    // ---------- Dung lượng theo từng ngày (nguồn cho trang Quản lý dữ liệu) ----------
+    if (req.method === "GET" && path === "/api/storage") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureBytesColumn(env);
+
+      // Lệch múi giờ của client (phút, dương = phía đông UTC) để cắt mốc ngày theo
+      // giờ địa phương — nếu cắt theo UTC thì ảnh chụp tối ở VN sẽ rơi sang ngày hôm sau.
+      const tzRaw = Number(url.searchParams.get("tz"));
+      const tzMs = (Number.isFinite(tzRaw) ? Math.max(-840, Math.min(840, tzRaw)) : 0) * 60_000;
+
+      type DayRow = {
+        day: string;
+        items: number;
+        bytes: number;
+        images: number;
+        videos: number;
+        image_bytes: number;
+        video_bytes: number;
+        unsized: number;
+      };
+      type TotalRow = {
+        items: number;
+        bytes: number;
+        images: number;
+        videos: number;
+        image_bytes: number;
+        video_bytes: number;
+        unsized: number;
+        oldest_at: number | null;
+        newest_at: number | null;
+      };
+
+      const [dayRes, totalRes] = await Promise.all([
+        env.DB.prepare(
+          `SELECT strftime('%Y-%m-%d', (created_at + ?) / 1000, 'unixepoch') AS day,
+                  COUNT(*) AS items,
+                  COALESCE(SUM(bytes), 0) AS bytes,
+                  COALESCE(SUM(CASE WHEN type = 'image' THEN 1 ELSE 0 END), 0) AS images,
+                  COALESCE(SUM(CASE WHEN type = 'video' THEN 1 ELSE 0 END), 0) AS videos,
+                  COALESCE(SUM(CASE WHEN type = 'image' THEN bytes ELSE 0 END), 0) AS image_bytes,
+                  COALESCE(SUM(CASE WHEN type = 'video' THEN bytes ELSE 0 END), 0) AS video_bytes,
+                  COALESCE(SUM(CASE WHEN bytes IS NULL THEN 1 ELSE 0 END), 0) AS unsized
+             FROM items
+            GROUP BY day
+            ORDER BY day DESC`
+        )
+          .bind(tzMs)
+          .all<DayRow>(),
+        env.DB.prepare(
+          `SELECT COUNT(*) AS items,
+                  COALESCE(SUM(bytes), 0) AS bytes,
+                  COALESCE(SUM(CASE WHEN type = 'image' THEN 1 ELSE 0 END), 0) AS images,
+                  COALESCE(SUM(CASE WHEN type = 'video' THEN 1 ELSE 0 END), 0) AS videos,
+                  COALESCE(SUM(CASE WHEN type = 'image' THEN bytes ELSE 0 END), 0) AS image_bytes,
+                  COALESCE(SUM(CASE WHEN type = 'video' THEN bytes ELSE 0 END), 0) AS video_bytes,
+                  COALESCE(SUM(CASE WHEN bytes IS NULL THEN 1 ELSE 0 END), 0) AS unsized,
+                  MIN(created_at) AS oldest_at,
+                  MAX(created_at) AS newest_at
+             FROM items`
+        ).first<TotalRow>(),
+      ]);
+
+      return json({
+        generatedAt: Date.now(),
+        total: {
+          items: totalRes?.items ?? 0,
+          bytes: totalRes?.bytes ?? 0,
+          images: totalRes?.images ?? 0,
+          videos: totalRes?.videos ?? 0,
+          imageBytes: totalRes?.image_bytes ?? 0,
+          videoBytes: totalRes?.video_bytes ?? 0,
+          unsized: totalRes?.unsized ?? 0,
+        },
+        oldestAt: totalRes?.oldest_at ?? null,
+        newestAt: totalRes?.newest_at ?? null,
+        days: (dayRes.results || []).map((r) => ({
+          day: r.day,
+          items: r.items,
+          bytes: r.bytes,
+          images: r.images,
+          videos: r.videos,
+          imageBytes: r.image_bytes,
+          videoBytes: r.video_bytes,
+          unsized: r.unsized,
+        })),
+      });
+    }
+
+    // ---------- Nội dung trong một khoảng thời gian (kèm dung lượng) ----------
+    if (req.method === "GET" && path === "/api/storage/items") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureBytesColumn(env);
+
+      const fromRaw = Number(url.searchParams.get("from"));
+      const toRaw = Number(url.searchParams.get("to"));
+      const from = Number.isFinite(fromRaw) ? fromRaw : 0;
+      const to = Number.isFinite(toRaw) && toRaw > 0 ? toRaw : Date.now();
+      const limitRaw = Number(url.searchParams.get("limit"));
+      const limit = Math.max(1, Math.min(1000, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 300));
+
+      type Row = Pick<ItemRow, "id" | "type" | "title" | "created_at" | "bytes">;
+      const [listRes, countRes] = await Promise.all([
+        env.DB.prepare(
+          `SELECT id, type, title, created_at, bytes FROM items
+            WHERE created_at >= ? AND created_at <= ?
+            ORDER BY bytes IS NULL, bytes DESC, created_at DESC
+            LIMIT ?`
+        )
+          .bind(from, to, limit)
+          .all<Row>(),
+        env.DB.prepare(
+          `SELECT COUNT(*) AS n, COALESCE(SUM(bytes), 0) AS bytes FROM items
+            WHERE created_at >= ? AND created_at <= ?`
+        )
+          .bind(from, to)
+          .first<{ n: number; bytes: number }>(),
+      ]);
+
+      const total = countRes?.n ?? 0;
+      return json({
+        total,
+        totalBytes: countRes?.bytes ?? 0,
+        truncated: total > limit,
+        items: (listRes.results || []).map((r) => ({
+          id: r.id,
+          type: r.type,
+          title: r.title,
+          createdAt: r.created_at,
+          bytes: r.bytes,
+          url: `${url.origin}/v/${r.id}`,
+          fileUrl: `${url.origin}/file/${r.id}`,
+        })),
+      });
+    }
+
+    // ---------- Đối chiếu dung lượng thật trên R2 + tìm file rác ----------
+    if (req.method === "POST" && path === "/api/storage/sync") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureBytesColumn(env);
+
+      const [dbRes, scan] = await Promise.all([
+        env.DB.prepare("SELECT id, bytes FROM items").all<{ id: string; bytes: number | null }>(),
+        scanR2ByItem(env.BUCKET),
+      ]);
+      const rows = dbRes.results || [];
+      const knownIds = new Set(rows.map((r) => r.id));
+
+      // Chỉ ghi lại những bản ghi lệch/chưa có → lần sync sau gần như không tốn write.
+      const updates: { id: string; bytes: number }[] = [];
+      let missingFiles = 0;
+      for (const row of rows) {
+        const real = scan.perId.get(row.id);
+        if (!real) {
+          missingFiles += 1; // bản ghi D1 còn nhưng file R2 đã mất
+          continue;
+        }
+        if (row.bytes !== real.bytes) updates.push({ id: row.id, bytes: real.bytes });
+      }
+      for (const group of chunk(updates, 50)) {
+        await env.DB.batch(
+          group.map((u) =>
+            env.DB.prepare("UPDATE items SET bytes = ? WHERE id = ?").bind(u.bytes, u.id)
+          )
+        );
+      }
+
+      // File rác: có trên R2 nhưng không còn bản ghi D1 (xoá hụt trước đây). Bỏ qua file
+      // vừa tải lên dưới 1 giờ để không đụng vào upload đang dở giữa chừng.
+      const cutoff = Date.now() - 60 * 60 * 1000;
+      let orphanCount = 0;
+      let orphanBytes = 0;
+      for (const [id, info] of scan.perId) {
+        if (knownIds.has(id) || info.uploadedAt > cutoff) continue;
+        orphanCount += info.keys.length;
+        orphanBytes += info.bytes;
+      }
+
+      return json({
+        updated: updates.length,
+        missingFiles,
+        scannedObjects: scan.objectCount,
+        listOperations: scan.listOperations,
+        orphan: { count: orphanCount, bytes: orphanBytes },
+      });
+    }
+
+    // ---------- Xoá hàng loạt: theo id / khoảng thời gian / file rác ----------
+    if (req.method === "POST" && path === "/api/storage/purge") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureBytesColumn(env);
+
+      let body: { ids?: string[]; from?: number; to?: number; orphans?: boolean };
+      try {
+        body = await req.json();
+      } catch {
+        return json({ error: "Dữ liệu không hợp lệ" }, 400);
+      }
+
+      // Dọn file rác trên R2 (không có bản ghi D1 tương ứng)
+      if (body.orphans) {
+        const [dbRes, scan] = await Promise.all([
+          env.DB.prepare("SELECT id FROM items").all<{ id: string }>(),
+          scanR2ByItem(env.BUCKET),
+        ]);
+        const knownIds = new Set((dbRes.results || []).map((r) => r.id));
+        const cutoff = Date.now() - 60 * 60 * 1000;
+        const keys: string[] = [];
+        let bytesFreed = 0;
+        for (const [id, info] of scan.perId) {
+          if (knownIds.has(id) || info.uploadedAt > cutoff) continue;
+          keys.push(...info.keys);
+          bytesFreed += info.bytes;
+        }
+        await deleteR2Keys(env.BUCKET, keys);
+        return json({ deleted: 0, bytesFreed, orphansDeleted: keys.length, hasMore: false });
+      }
+
+      // Mỗi lượt xử lý tối đa ngần này bản ghi để không chạm giới hạn thời gian chạy của
+      // Worker; client lặp lại khi hasMore = true.
+      const MAX_PER_CALL = 2000;
+      type DelRow = Pick<ItemRow, "id" | "r2_key" | "r2_key_orig" | "bytes">;
+      let rows: DelRow[] = [];
+      let hasMore = false;
+
+      if (Array.isArray(body.ids) && body.ids.length > 0) {
+        const ids = body.ids.filter((x) => typeof x === "string").slice(0, MAX_PER_CALL);
+        hasMore = body.ids.length > ids.length;
+        for (const part of chunk(ids, 50)) {
+          const res = await env.DB.prepare(
+            `SELECT id, r2_key, r2_key_orig, bytes FROM items
+              WHERE id IN (${part.map(() => "?").join(",")})`
+          )
+            .bind(...part)
+            .all<DelRow>();
+          rows.push(...(res.results || []));
+        }
+      } else if (Number.isFinite(body.from) || Number.isFinite(body.to)) {
+        const from = Number.isFinite(body.from) ? (body.from as number) : 0;
+        const to = Number.isFinite(body.to) ? (body.to as number) : Date.now();
+        const res = await env.DB.prepare(
+          `SELECT id, r2_key, r2_key_orig, bytes FROM items
+            WHERE created_at >= ? AND created_at <= ?
+            ORDER BY created_at ASC LIMIT ?`
+        )
+          .bind(from, to, MAX_PER_CALL + 1)
+          .all<DelRow>();
+        rows = res.results || [];
+        if (rows.length > MAX_PER_CALL) {
+          rows = rows.slice(0, MAX_PER_CALL);
+          hasMore = true;
+        }
+      } else {
+        return json({ error: "Thiếu ids hoặc khoảng thời gian" }, 400);
+      }
+
+      if (rows.length === 0) return json({ deleted: 0, bytesFreed: 0, hasMore: false });
+
+      const keys = rows.flatMap((r) => (r.r2_key_orig ? [r.r2_key, r.r2_key_orig] : [r.r2_key]));
+      // Xoá file trước, rồi mới xoá bản ghi: nếu đứt giữa chừng thì bản ghi còn đó và
+      // lần xoá sau vẫn dọn được, thay vì để lại file rác không ai biết.
+      await deleteR2Keys(env.BUCKET, keys);
+      await deleteItemRows(env, rows.map((r) => r.id));
+
+      return json({
+        deleted: rows.length,
+        bytesFreed: rows.reduce((sum, r) => sum + (r.bytes ?? 0), 0),
+        hasMore,
+      });
+    }
+
     // ---------- Tạo mới ----------
     if (req.method === "POST" && path === "/api/upload") {
       if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
       try {
+        await ensureBytesColumn(env);
         const form = await req.formData();
         const file = asFile(form.get("file"));
         const type = String(form.get("type") || "image");
@@ -425,18 +794,20 @@ export default {
 
         // Lưu thêm ảnh gốc (để sửa lại annotate) nếu có — cũng là WebP.
         let origKey: string | null = null;
+        let bytes = file.size;
         if (type === "image" && original) {
           origKey = `items/${id}_orig.webp`;
           await env.BUCKET.put(origKey, original.stream(), {
             httpMetadata: { contentType: "image/webp" },
           });
+          bytes += original.size;
         }
 
         await env.DB.prepare(
-          `INSERT INTO items (id, type, r2_key, r2_key_orig, mime, annotations, title, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          `INSERT INTO items (id, type, r2_key, r2_key_orig, mime, annotations, title, created_at, bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(id, type, key, origKey, mime, annotations, title, Date.now())
+          .bind(id, type, key, origKey, mime, annotations, title, Date.now(), bytes)
           .run();
 
         return json({ id, url: `${url.origin}/v/${id}` });
@@ -495,17 +866,23 @@ export default {
       }
 
       if (req.method === "PATCH") {
+        await ensureBytesColumn(env);
         const form = await req.formData();
         const file = asFile(form.get("file"));
         // Thay ảnh đã gộp (giữ nguyên key) nếu gửi file mới
+        const sets: string[] = [];
+        const binds: (string | number | null)[] = [];
         if (file) {
           await env.BUCKET.put(row.r2_key, file.stream(), {
             httpMetadata: { contentType: row.mime },
           });
+          // Ảnh gộp mới có kích thước khác → cập nhật lại dung lượng của mục. Ảnh gốc
+          // không đổi nên chỉ cần hỏi kích thước của nó (1 Class B op cho mỗi lần sửa).
+          const origSize = row.r2_key_orig ? (await env.BUCKET.head(row.r2_key_orig))?.size ?? 0 : 0;
+          sets.push("bytes = ?");
+          binds.push(file.size + origSize);
         }
         // Chỉ cập nhật cột nào được gửi (tránh xoá nhầm)
-        const sets: string[] = [];
-        const binds: (string | null)[] = [];
         if (form.has("annotations")) {
           sets.push("annotations = ?");
           binds.push(form.get("annotations")?.toString() ?? null);

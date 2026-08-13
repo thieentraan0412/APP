@@ -10,6 +10,7 @@ import { LibraryScreen } from "./screens/LibraryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { ConfirmModal } from "./components/ConfirmModal";
 import { UsageScreen } from "./screens/UsageScreen";
+import { DataScreen } from "./screens/DataScreen";
 import { AuthScreen } from "./screens/AuthScreen";
 import { fetchMe, logout, getStoredUser, type AuthUser } from "./lib/auth";
 import {
@@ -22,15 +23,21 @@ import {
   updateTitle,
   fetchAsDataUrl,
   getUsageStats,
+  getStorageOverview,
+  syncStorage,
+  purgeRange,
+  purgeIds,
+  purgeOrphans,
   type LibraryItem,
   type UsageStats,
+  type StorageOverview,
 } from "./lib/api";
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
-type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage";
+type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage" | "data";
 
 const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3", pause: "Control+Shift+H", regionRecord: "Control+Shift+4" };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
@@ -51,10 +58,10 @@ function checkUsageWarnings(stats: UsageStats): string[] {
   return warns;
 }
 
-function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, onRecord, onRegionRecord, onUsage, onSettings, recording, usageWarnings }: {
+function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, onRecord, onRegionRecord, onData, onUsage, onSettings, recording, usageWarnings }: {
   screen: Screen; onHome: () => void; onCapture: () => void; onRegionCapture: () => void; onQrScan: () => void; onRecord: () => void;
   onRegionRecord: () => void;
-  onUsage: () => void; onSettings: () => void; recording: boolean; usageWarnings: string[];
+  onData: () => void; onUsage: () => void; onSettings: () => void; recording: boolean; usageWarnings: string[];
 }) {
   const hasWarn = usageWarnings.length > 0;
   return (
@@ -87,6 +94,9 @@ function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, o
         </svg>
       </button>
       <div className="lib-spacer"/>
+      <button className={`lib-tool${screen === "data" ? " lib-tool--active" : ""}`} onClick={onData} title="Quản lý dữ liệu">
+        <svg {...SidebarS}><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg>
+      </button>
       <button
         className={`lib-tool${screen === "usage" ? " lib-tool--active" : ""}`}
         onClick={onUsage}
@@ -155,6 +165,14 @@ function App() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageWarnings, setUsageWarnings] = useState<string[]>([]);
   const [warnDismissed, setWarnDismissed] = useState(false);
+
+  // Quản lý dữ liệu (dung lượng theo thời gian)
+  const [storage, setStorage] = useState<StorageOverview | null>(null);
+  const [storageLoading, setStorageLoading] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
+  const [orphan, setOrphan] = useState<{ count: number; bytes: number } | null>(null);
+  const [syncing, setSyncing] = useState(false);
+
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
 
   // Video chờ lưu (chưa upload)
@@ -655,6 +673,11 @@ function App() {
 
   async function openLibrary() {
     setScreen("library");
+    await reloadLibrary();
+  }
+
+  // Tải lại thư viện mà KHÔNG chuyển màn hình (dùng sau khi xoá từ trang Quản lý dữ liệu)
+  async function reloadLibrary() {
     setLibLoading(true);
     setLibError(null);
     try {
@@ -676,10 +699,122 @@ function App() {
       // Tự động thử lại (backoff tăng dần) — không bắt người dùng phải bấm Làm mới liên tục.
       if (libRetry.current < 5 && screenRef.current === "library") {
         libRetry.current += 1;
-        window.setTimeout(() => { if (screenRef.current === "library") openLibrary(); }, 2500 * libRetry.current);
+        window.setTimeout(() => { if (screenRef.current === "library") reloadLibrary(); }, 2500 * libRetry.current);
       }
     } finally {
       setLibLoading(false);
+    }
+  }
+
+  // ── Quản lý dữ liệu ────────────────────────────────────────
+  function fmtBytes(bytes: number): string {
+    if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
+    if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
+    if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(0)} KB`;
+    return `${Math.round(bytes)} B`;
+  }
+
+  function askConfirm(message: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      setConfirm({
+        message,
+        onCancel: () => resolve(false),
+        onConfirm: () => { setConfirm(null); resolve(true); },
+      });
+    });
+  }
+
+  async function loadStorage() {
+    setStorageLoading(true);
+    setStorageError(null);
+    try {
+      setStorage(await getStorageOverview());
+    } catch (err) {
+      setStorageError(String(err));
+    } finally {
+      setStorageLoading(false);
+    }
+  }
+
+  async function openData() {
+    setScreen("data");
+    await loadStorage();
+  }
+
+  // Sau khi xoá: thư viện, dung lượng và thống kê đều đã cũ → nạp lại (không đổi màn hình)
+  async function afterPurge() {
+    await Promise.all([loadStorage(), reloadLibrary(), loadUsageStats(true)]);
+  }
+
+  async function handleSyncStorage() {
+    setSyncing(true);
+    try {
+      const r = await syncStorage();
+      setOrphan(r.orphan);
+      await loadStorage();
+      const parts = [`Đã cập nhật ${r.updated} mục`];
+      if (r.orphan.count > 0) parts.push(`${r.orphan.count} file rác (${fmtBytes(r.orphan.bytes)})`);
+      if (r.missingFiles > 0) parts.push(`${r.missingFiles} mục thiếu file`);
+      showToast(parts.join(" · "));
+    } catch (err) {
+      showToast("Đồng bộ lỗi: " + String(err));
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function handlePurgeRange(from: number, to: number, label: string, items: number, bytes: number): Promise<boolean> {
+    const ok = await askConfirm(
+      `Xoá ${items} mục ${label}? Giải phóng khoảng ${fmtBytes(bytes)}. Link chia sẻ của các mục này sẽ hỏng vĩnh viễn.`
+    );
+    if (!ok) return false;
+    try {
+      const r = await purgeRange(from, to);
+      showToast(`Đã xoá ${r.deleted} mục · giải phóng ${fmtBytes(r.bytesFreed)}`);
+      await afterPurge();
+      return true;
+    } catch (err) {
+      showToast("Xoá lỗi: " + String(err));
+      return false;
+    }
+  }
+
+  async function handlePurgeIds(ids: string[], bytes: number): Promise<boolean> {
+    const ok = await askConfirm(
+      `Xoá ${ids.length} mục đã chọn? Giải phóng khoảng ${fmtBytes(bytes)}. Không thể hoàn tác.`
+    );
+    if (!ok) return false;
+    try {
+      const r = await purgeIds(ids);
+      setImgVersions((prev) => {
+        let changed = false;
+        const next = { ...prev };
+        for (const id of ids) if (id in next) { delete next[id]; changed = true; }
+        if (changed) { try { localStorage.setItem(IMG_VER_KEY, JSON.stringify(next)); } catch {} }
+        return changed ? next : prev;
+      });
+      showToast(`Đã xoá ${r.deleted} mục · giải phóng ${fmtBytes(r.bytesFreed)}`);
+      await afterPurge();
+      return true;
+    } catch (err) {
+      showToast("Xoá lỗi: " + String(err));
+      return false;
+    }
+  }
+
+  async function handlePurgeOrphans() {
+    if (!orphan || orphan.count === 0) return;
+    const ok = await askConfirm(
+      `Dọn ${orphan.count} file rác (${fmtBytes(orphan.bytes)})? Đây là file không còn nội dung nào dùng tới.`
+    );
+    if (!ok) return;
+    try {
+      const r = await purgeOrphans();
+      setOrphan({ count: 0, bytes: 0 });
+      showToast(`Đã dọn ${r.orphansDeleted ?? 0} file · giải phóng ${fmtBytes(r.bytesFreed)}`);
+      await loadUsageStats(true);
+    } catch (err) {
+      showToast("Dọn rác lỗi: " + String(err));
     }
   }
 
@@ -843,6 +978,8 @@ function App() {
     setLibItems([]);
     setUsageStats(null);
     setUsageWarnings([]);
+    setStorage(null);
+    setOrphan(null);
     setScreen("library");
   }
 
@@ -992,7 +1129,7 @@ function App() {
 
   const toggleRecord = () => invoke("toggle_recording_cmd").catch(() => {});
 
-  if (screen === "library" || screen === "usage" || screen === "settings") {
+  if (screen === "library" || screen === "usage" || screen === "settings" || screen === "data") {
     return (
       <div className="lib-layout">
         {toast && <div className="toast">{toast}</div>}
@@ -1009,6 +1146,7 @@ function App() {
           onQrScan={triggerQrScan}
           onRecord={toggleRecord}
           onRegionRecord={manualRegionRecord}
+          onData={openData}
           onUsage={openUsage}
           onSettings={() => setScreen("settings")}
           recording={recording}
@@ -1065,6 +1203,20 @@ function App() {
               stats={usageStats}
               loading={usageLoading}
               onRefresh={openUsage}
+            />
+          )}
+          {screen === "data" && (
+            <DataScreen
+              overview={storage}
+              loading={storageLoading}
+              error={storageError}
+              orphan={orphan}
+              syncing={syncing}
+              onRefresh={loadStorage}
+              onSync={handleSyncStorage}
+              onPurgeOrphans={handlePurgeOrphans}
+              onPurgeRange={handlePurgeRange}
+              onPurgeIds={handlePurgeIds}
             />
           )}
           {screen === "settings" && (

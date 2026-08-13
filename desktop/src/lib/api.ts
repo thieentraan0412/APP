@@ -232,6 +232,141 @@ export function getUsageStats(): Promise<UsageStats> {
   return p;
 }
 
+// ---------- Quản lý dữ liệu theo thời gian ----------
+export interface StorageDay {
+  day: string; // yyyy-mm-dd theo giờ địa phương
+  items: number;
+  bytes: number;
+  images: number;
+  videos: number;
+  imageBytes: number;
+  videoBytes: number;
+  unsized: number; // số mục chưa biết dung lượng (cần Đồng bộ)
+}
+
+export interface StorageOverview {
+  generatedAt: number;
+  total: {
+    items: number;
+    bytes: number;
+    images: number;
+    videos: number;
+    imageBytes: number;
+    videoBytes: number;
+    unsized: number;
+  };
+  oldestAt: number | null;
+  newestAt: number | null;
+  days: StorageDay[];
+}
+
+export interface StorageItem {
+  id: string;
+  type: "image" | "video";
+  title: string | null;
+  createdAt: number;
+  bytes: number | null;
+  url: string;
+  fileUrl: string;
+}
+
+export interface StorageItemsPage {
+  total: number;
+  totalBytes: number;
+  truncated: boolean;
+  items: StorageItem[];
+}
+
+export interface StorageSyncResult {
+  updated: number;
+  missingFiles: number;
+  scannedObjects: number;
+  listOperations: number;
+  orphan: { count: number; bytes: number };
+}
+
+export interface PurgeResult {
+  deleted: number;
+  bytesFreed: number;
+  hasMore: boolean;
+  orphansDeleted?: number;
+}
+
+/** Dung lượng đang chiếm, gom theo từng ngày (cắt mốc ngày theo giờ máy người dùng). */
+export async function getStorageOverview(): Promise<StorageOverview> {
+  const tz = -new Date().getTimezoneOffset(); // phút lệch so với UTC (VN = +420)
+  const res = await fetchRetry(`${WORKER_URL}/api/storage?tz=${tz}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Không tải được dung lượng (HTTP ${res.status})`);
+  return res.json();
+}
+
+/** Các mục trong một khoảng thời gian, sắp xếp mục nặng nhất trước. */
+export async function getStorageItems(from: number, to: number, limit = 300): Promise<StorageItemsPage> {
+  const res = await fetchRetry(
+    `${WORKER_URL}/api/storage/items?from=${from}&to=${to}&limit=${limit}`,
+    { headers: authHeaders() }
+  );
+  if (!res.ok) throw new Error(`Không tải được danh sách (HTTP ${res.status})`);
+  return res.json();
+}
+
+/** Quét R2 để điền dung lượng cho dữ liệu cũ và phát hiện file rác. */
+export async function syncStorage(): Promise<StorageSyncResult> {
+  const res = await fetchRetry(`${WORKER_URL}/api/storage/sync`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!res.ok) throw new Error(`Đồng bộ thất bại (HTTP ${res.status})`);
+  return res.json();
+}
+
+async function postPurge(body: Record<string, unknown>): Promise<PurgeResult> {
+  const res = await fetchRetry(`${WORKER_URL}/api/storage/purge`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Xoá thất bại (HTTP ${res.status})`);
+  return res.json();
+}
+
+// Worker xử lý tối đa 2.000 mục mỗi lượt → gọi lại tới khi hết (hasMore = false).
+async function purgeAll(body: Record<string, unknown>): Promise<PurgeResult> {
+  let deleted = 0;
+  let bytesFreed = 0;
+  for (let round = 0; round < 25; round++) {
+    const r = await postPurge(body);
+    deleted += r.deleted;
+    bytesFreed += r.bytesFreed;
+    if (!r.hasMore) return { deleted, bytesFreed, hasMore: false };
+  }
+  return { deleted, bytesFreed, hasMore: true };
+}
+
+/** Xoá mọi nội dung tạo trong khoảng [from, to]. */
+export function purgeRange(from: number, to: number): Promise<PurgeResult> {
+  return purgeAll({ from, to });
+}
+
+/** Xoá các mục được chọn (theo id). */
+export async function purgeIds(ids: string[]): Promise<PurgeResult> {
+  let deleted = 0;
+  let bytesFreed = 0;
+  // Cắt sẵn thành lô 2.000 — mỗi lời gọi worker chỉ nhận ngần đó.
+  for (let i = 0; i < ids.length; i += 2000) {
+    const r = await postPurge({ ids: ids.slice(i, i + 2000) });
+    deleted += r.deleted;
+    bytesFreed += r.bytesFreed;
+  }
+  return { deleted, bytesFreed, hasMore: false };
+}
+
+/** Dọn file trên R2 không còn bản ghi tương ứng (rác do xoá hụt trước đây). */
+export function purgeOrphans(): Promise<PurgeResult> {
+  return postPurge({ orphans: true });
+}
+
 // Tải một URL ảnh về dạng data URL (để mở lại trong editor khi sửa)
 export async function fetchAsDataUrl(url: string): Promise<string> {
   const res = await fetchRetry(url);
