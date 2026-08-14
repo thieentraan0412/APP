@@ -14,6 +14,12 @@ interface Props {
   /** Trả về true nếu người dùng xác nhận và đã xoá xong */
   onPurgeRange: (from: number, to: number, label: string, items: number, bytes: number) => Promise<boolean>;
   onPurgeIds: (ids: string[], bytes: number) => Promise<boolean>;
+  /** Tải các mục đã chọn về máy rồi mới xoá trên cloud. true = đã xoá xong */
+  onArchiveItems: (items: StorageItem[]) => Promise<boolean>;
+  /** Đọc một thư mục kho dưới máy và tải các mục trong đó lên lại */
+  onRestore: () => void;
+  /** Tiến độ tải về / khôi phục đang chạy (null = rảnh) */
+  progress: { title: string; done: number; total: number; label: string } | null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -67,6 +73,8 @@ const S = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none" as const, 
 const IcoTrash = () => <svg {...S}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>;
 const IcoRefresh = () => <svg {...S}><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>;
 const IcoSync = () => <svg {...S}><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" /><path d="M3 21v-5h5" /></svg>;
+const IcoSave = () => <svg {...S}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>;
+const IcoRestore = () => <svg {...S}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>;
 const IcoChevron = ({ open }: { open: boolean }) => (
   <svg {...S} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }}><polyline points="9 18 15 12 9 6" /></svg>
 );
@@ -222,7 +230,7 @@ function CutoffDate({ value, onChange }: { value: string; onChange: (iso: string
 }
 
 export function DataScreen(props: Props) {
-  const { overview, loading, error, orphan, syncing, onRefresh, onSync, onPurgeOrphans, onPurgeRange, onPurgeIds } = props;
+  const { overview, loading, error, orphan, syncing, onRefresh, onSync, onPurgeOrphans, onPurgeRange, onPurgeIds, onArchiveItems, onRestore, progress } = props;
 
   const [groupBy, setGroupBy] = useState<GroupBy>("month");
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -307,6 +315,15 @@ export function DataScreen(props: Props) {
     await run(() => onPurgeRange(0, to, `trước ngày ${isoToDisplay(cutoff)}`, oldStats.items, oldStats.bytes));
   }
 
+  // Tải về máy rồi mới xoá. Thứ tự này do App quyết định (App chỉ xoá những mục đã lưu
+  // xong), ở đây chỉ cần bỏ chọn khi việc đó kết thúc.
+  async function archiveSelected(p: Period) {
+    const chosen = items.filter((it) => selected.has(it.id));
+    if (chosen.length === 0) return;
+    const ok = await run(() => onArchiveItems(chosen), p);
+    if (ok) setSelected(new Set());
+  }
+
   async function deleteSelected(p: Period) {
     const ids = items.filter((it) => selected.has(it.id)).map((it) => it.id);
     if (ids.length === 0) return;
@@ -317,6 +334,9 @@ export function DataScreen(props: Props) {
 
   const selectedBytes = items.filter((it) => selected.has(it.id)).reduce((s, it) => s + (it.bytes ?? 0), 0);
   const allSelected = items.length > 0 && items.every((it) => selected.has(it.id));
+  // Khôi phục chạy từ header nên không đi qua run() → busy vẫn false. Chốt riêng để trong
+  // lúc tải về / khôi phục không ai bấm được nút xoá.
+  const locked = busy || progress !== null;
 
   return (
     <div className="data-page">
@@ -330,10 +350,13 @@ export function DataScreen(props: Props) {
           </p>
         </div>
         <div className="data-header-actions">
-          <button onClick={onSync} disabled={syncing || loading || busy} title="Quét R2 để cập nhật dung lượng thật và tìm file rác">
+          <button onClick={onRestore} disabled={loading || busy || !!progress} title="Chọn thư mục kho đã lưu dưới máy và tải các mục trong đó lên lại">
+            <IcoRestore />Khôi phục từ máy
+          </button>
+          <button onClick={onSync} disabled={syncing || loading || locked} title="Quét R2 để cập nhật dung lượng thật và tìm file rác">
             <span className={syncing ? "data-spin" : ""}><IcoSync /></span>{syncing ? "Đang quét…" : "Đồng bộ dung lượng"}
           </button>
-          <button onClick={onRefresh} disabled={loading || busy}>
+          <button onClick={onRefresh} disabled={loading || locked}>
             <span className={loading ? "data-spin" : ""}><IcoRefresh /></span>{loading ? "Đang tải…" : "Làm mới"}
           </button>
         </div>
@@ -341,6 +364,19 @@ export function DataScreen(props: Props) {
 
       <main className="data-scroll">
         {error && <p className="data-error">Lỗi: {error}</p>}
+
+        {progress && (
+          <div className="data-progress">
+            <div className="data-progress-head">
+              <b>{progress.title}</b>
+              <span>{formatNumber(progress.done)}/{formatNumber(progress.total)}</span>
+            </div>
+            <div className="data-progress-bar">
+              <div style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%` }} />
+            </div>
+            {progress.label && <small>{progress.label}</small>}
+          </div>
+        )}
 
         {!overview && !error && (
           <div className="data-empty">{loading ? "Đang tính dung lượng…" : "Chưa tải được dữ liệu."}</div>
@@ -375,7 +411,7 @@ export function DataScreen(props: Props) {
               <div className="data-notice">
                 <b>{formatNumber(overview.total.unsized)} mục chưa biết dung lượng</b>
                 <span>Đây là dữ liệu tạo trước khi app ghi lại kích thước. Bấm “Đồng bộ dung lượng” để quét R2 và điền số liệu.</span>
-                <button className="data-btn" onClick={onSync} disabled={syncing || busy}>{syncing ? "Đang quét…" : "Đồng bộ ngay"}</button>
+                <button className="data-btn" onClick={onSync} disabled={syncing || locked}>{syncing ? "Đang quét…" : "Đồng bộ ngay"}</button>
               </div>
             )}
 
@@ -383,7 +419,7 @@ export function DataScreen(props: Props) {
               <div className="data-notice data-notice--warn">
                 <b>File rác: {formatNumber(orphan.count)} file · {formatBytes(orphan.bytes)}</b>
                 <span>File còn trên R2 nhưng không còn nội dung nào dùng tới (do lần xoá trước bị đứt giữa chừng). Xoá đi sẽ giải phóng đúng ngần này dung lượng.</span>
-                <button className="data-btn data-btn--danger" onClick={onPurgeOrphans} disabled={busy || syncing}>Dọn file rác</button>
+                <button className="data-btn data-btn--danger" onClick={onPurgeOrphans} disabled={locked || syncing}>Dọn file rác</button>
               </div>
             )}
 
@@ -416,7 +452,7 @@ export function DataScreen(props: Props) {
                     <>Không có nội dung nào cũ hơn ngày {isoToDisplay(cutoff)}</>
                   )}
                 </div>
-                <button className="data-btn data-btn--danger" onClick={deleteOld} disabled={oldStats.items === 0 || busy}>
+                <button className="data-btn data-btn--danger" onClick={deleteOld} disabled={oldStats.items === 0 || locked}>
                   <IcoTrash />Xoá dữ liệu cũ
                 </button>
               </div>
@@ -465,7 +501,7 @@ export function DataScreen(props: Props) {
                         <button
                           className="data-ico data-ico--danger"
                           title={`Xoá toàn bộ ${p.label}`}
-                          disabled={busy}
+                          disabled={locked}
                           onClick={(e) => { e.stopPropagation(); deletePeriod(p); }}
                         >
                           <IcoTrash />
@@ -493,9 +529,19 @@ export function DataScreen(props: Props) {
                                 </span>
                                 <div className="data-spacer" />
                                 {selected.size > 0 && (
-                                  <button className="data-btn data-btn--danger" onClick={() => deleteSelected(p)} disabled={busy}>
-                                    <IcoTrash />Xoá {selected.size} mục ({formatBytes(selectedBytes)})
-                                  </button>
+                                  <>
+                                    <button
+                                      className="data-btn data-btn--save"
+                                      onClick={() => archiveSelected(p)}
+                                      disabled={locked}
+                                      title="Tải về thư mục trên máy, tải xong mới xoá trên cloud — khôi phục lại được"
+                                    >
+                                      <IcoSave />Lưu về máy & xoá {selected.size} mục
+                                    </button>
+                                    <button className="data-btn data-btn--danger" onClick={() => deleteSelected(p)} disabled={locked}>
+                                      <IcoTrash />Xoá hẳn {selected.size} mục ({formatBytes(selectedBytes)})
+                                    </button>
+                                  </>
                                 )}
                               </div>
 
@@ -532,7 +578,9 @@ export function DataScreen(props: Props) {
 
             <p className="data-footnote">
               Dung lượng tính theo số byte thật trên Cloudflare R2 (ảnh đã gộp + ảnh gốc dùng để sửa lại annotate).
-              Xoá ở đây là xoá vĩnh viễn cả file lẫn link chia sẻ, không thể hoàn tác.
+              “Xoá hẳn” là xoá vĩnh viễn cả file lẫn link chia sẻ, không thể hoàn tác.
+              “Lưu về máy &amp; xoá” tải nội dung xuống thư mục bạn chọn trước, chỉ xoá trên cloud những mục đã lưu xong,
+              và khôi phục lại được bằng nút “Khôi phục từ máy” — nhưng mục khôi phục mang link chia sẻ mới, link cũ đã hỏng thì không sống lại.
             </p>
           </>
         )}
@@ -579,6 +627,15 @@ function DataStyles() {
     .data-btn:disabled{opacity:.5;cursor:default}
     .data-btn--danger{color:#b91c1c;border-color:#fca5a5;background:#fff}
     .data-btn--danger:hover:not(:disabled){background:#fef2f2}
+    .data-btn--save{color:#1d4ed8;border-color:#bfdbfe;background:#fff}
+    .data-btn--save:hover:not(:disabled){background:#eff6ff}
+
+    .data-progress{background:#fff;border:1px solid #dbeafe;border-radius:12px;padding:12px 15px;margin-bottom:11px;box-shadow:0 1px 3px rgba(15,23,42,.04)}
+    .data-progress-head{display:flex;align-items:center;justify-content:space-between;font-size:12.5px;color:#1e40af}
+    .data-progress-head span{font-variant-numeric:tabular-nums;color:#6b7280;font-weight:650}
+    .data-progress-bar{height:7px;border-radius:99px;background:#eef0f3;overflow:hidden;margin-top:9px}
+    .data-progress-bar>div{height:100%;border-radius:99px;background:linear-gradient(90deg,#2563eb,#60a5fa);transition:width .25s ease}
+    .data-progress small{display:block;margin-top:7px;font-size:11px;color:#8a919d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
     .data-segment,.data-chips{display:flex;gap:0;background:#f1f3f6;border-radius:9px;padding:3px}
     .data-segment button,.data-chips button{border:none;background:none;border-radius:7px;padding:6px 11px;font-size:11.5px;font-weight:650;color:#6b7280;cursor:pointer}

@@ -15,6 +15,13 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+// Giới hạn độ dài một phiên quay. Chạm mốc → tự dừng như bấm phím tắt dừng (nối đoạn,
+// trả video về app). Chỉ tính thời gian THỰC SỰ quay: khoảng tạm dừng không bị trừ vào
+// hạn mức, vì nó cũng không nằm trong video xuất ra.
+const MAX_RECORD_MS: u64 = 5 * 60 * 1000;
+// Nhịp kiểm tra của watchdog. 250ms đủ nhỏ để video không vượt mốc quá vài phần mười giây.
+const LIMIT_TICK_MS: u64 = 250;
+
 #[derive(Default)]
 pub struct RecState {
     inner: Mutex<Session>,
@@ -53,6 +60,23 @@ struct Session {
     // sau khi "quay tiếp" cắt sai vùng sẽ khác độ phân giải đoạn trước → nối bằng
     // `-c copy` thất bại, mất trắng bản quay.
     crop: Option<Crop>,
+    // Tổng thời lượng các đoạn ĐÃ đóng (ms) — dùng để chặn ở MAX_RECORD_MS.
+    elapsed_ms: u64,
+    // Mốc bắt đầu đoạn đang quay; None khi đang tạm dừng (lúc đó không cộng thời gian).
+    seg_started: Option<std::time::Instant>,
+    // Số hiệu phiên quay, tăng mỗi lần bắt đầu/dừng. Watchdog nhớ số của phiên mình canh
+    // và tự thoát khi lệch — nếu không, watchdog của phiên cũ có thể dừng nhầm phiên mới.
+    generation: u64,
+}
+
+impl Session {
+    // Thời lượng video sẽ xuất ra nếu dừng ngay lúc này = các đoạn đã đóng + đoạn đang quay.
+    fn recorded_ms(&self) -> u64 {
+        let current = self
+            .seg_started
+            .map_or(0, |t| t.elapsed().as_millis() as u64);
+        self.elapsed_ms + current
+    }
 }
 
 // Đang quay hay không — để chặn mở lớp chọn vùng đè lên một phiên quay đang chạy.
@@ -204,7 +228,7 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
         let out = seg_path(0);
         match spawn_segment(&app, &ffmpeg, &out, crop.as_ref()) {
             Ok(mut child) => {
-                {
+                let generation = {
                     let st = app.state::<RecState>();
                     let mut s = st.inner.lock().unwrap();
                     s.stdin = child.stdin.take();
@@ -216,7 +240,12 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
                     s.seg_index = 0;
                     s.crop = crop;
                     s.busy = false; // khởi động xong
-                }
+                    s.elapsed_ms = 0;
+                    s.seg_started = Some(std::time::Instant::now());
+                    s.generation = s.generation.wrapping_add(1);
+                    s.generation
+                };
+                spawn_limit_watchdog(&app, generation);
                 let _ = app.emit("recording-started", ());
                 match &crop {
                     // Quay vùng: KHÔNG hiện popup báo — nó nằm giữa màn hình nên sẽ lọt vào
@@ -240,6 +269,33 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
 fn clear_busy(app: &AppHandle) {
     let st = app.state::<RecState>();
     st.inner.lock().unwrap().busy = false;
+}
+
+// Canh phiên quay, chạm MAX_RECORD_MS thì dừng hộ người dùng. Đi qua đúng `stop()` như khi
+// bấm phím tắt nên vẫn nối đoạn, hiện lại cửa sổ chính và bắn "video-ready" — người dùng
+// nhận được bản quay 5 phút hoàn chỉnh chứ không mất.
+fn spawn_limit_watchdog(app: &AppHandle, generation: u64) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(LIMIT_TICK_MS));
+        let reached = {
+            let st = app.state::<RecState>();
+            let s = st.inner.lock().unwrap();
+            // Phiên đã dừng, hoặc đây là watchdog của phiên cũ → hết việc.
+            if !s.recording || s.generation != generation {
+                return;
+            }
+            // Đang pause/resume dở dang: nhường cho chuyển trạng thái đó xong đã, tick sau
+            // tính lại. Dừng chen ngang lúc này dễ giành mất `child`/`stdin` của nó (H5).
+            !s.busy && s.recorded_ms() >= MAX_RECORD_MS
+        };
+        if reached {
+            // Bắn trước khi dừng để app kịp giải thích vì sao đang quay lại tự tắt.
+            let _ = app.emit("recording-limit", ());
+            stop(&app);
+            return;
+        }
+    });
 }
 
 fn pause(app: &AppHandle) {
@@ -266,6 +322,10 @@ fn pause(app: &AppHandle) {
         }
         {
             let mut s = st.inner.lock().unwrap();
+            // Chốt thời lượng đoạn vừa đóng TRƯỚC khi bỏ mốc — sau dòng này đồng hồ đứng
+            // yên cho tới khi quay tiếp.
+            s.elapsed_ms = s.recorded_ms();
+            s.seg_started = None;
             s.segments.push(seg_path(seg_index));
             s.busy = false; // tạm dừng xong (H5)
         }
@@ -303,6 +363,7 @@ fn resume(app: &AppHandle) {
                     s.seg_index = new_index;
                     s.paused = false;
                     s.busy = false; // quay tiếp xong (H5)
+                    s.seg_started = Some(std::time::Instant::now()); // đồng hồ chạy lại
                 }
                 let _ = app.emit("recording-resumed", ());
             }
@@ -322,6 +383,10 @@ fn stop(app: &AppHandle) {
             return;
         }
         s.recording = false;
+        // Đổi số phiên → watchdog đang canh phiên này thoát ngay, không đụng vào phiên sau.
+        s.generation = s.generation.wrapping_add(1);
+        s.elapsed_ms = 0;
+        s.seg_started = None;
     }
     let _ = app.emit("recording-stopped", ());
     // Ẩn thông báo quay nếu vẫn còn hiện

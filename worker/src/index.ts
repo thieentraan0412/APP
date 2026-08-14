@@ -780,6 +780,13 @@ export default {
         const annotations = form.get("annotations")?.toString() ?? null;
         const title = form.get("title")?.toString()?.trim() || null;
         const original = asFile(form.get("original"));
+        // Khôi phục từ kho dưới máy gửi kèm thời điểm tạo GỐC để mục về đúng mốc thời gian
+        // cũ. Chỉ nhận giá trị hợp lệ (dương, không ở tương lai) — còn lại coi như tạo mới.
+        const createdAtRaw = Number(form.get("createdAt"));
+        const createdAt =
+          Number.isFinite(createdAtRaw) && createdAtRaw > 0 && createdAtRaw <= Date.now() + 60_000
+            ? Math.round(createdAtRaw)
+            : Date.now();
 
         if (!file) return json({ error: "Thiếu file" }, 400);
 
@@ -807,7 +814,7 @@ export default {
           `INSERT INTO items (id, type, r2_key, r2_key_orig, mime, annotations, title, created_at, bytes)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
-          .bind(id, type, key, origKey, mime, annotations, title, Date.now(), bytes)
+          .bind(id, type, key, origKey, mime, annotations, title, createdAt, bytes)
           .run();
 
         return json({ id, url: `${url.origin}/v/${id}` });

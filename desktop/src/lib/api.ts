@@ -98,6 +98,33 @@ export async function uploadVideo(blob: Blob): Promise<UploadResult> {
   return postUpload(form);
 }
 
+/**
+ * Tải một mục từ kho lưu trữ dưới máy trở lại cloud (khôi phục).
+ * Đây là mục MỚI: id và link chia sẻ mới, link cũ đã chết từ lúc xoá không sống lại được.
+ */
+export async function restoreUpload(params: {
+  file: Blob;
+  original: Blob | null;
+  type: "image" | "video";
+  title: string;
+  annotations: Annotations | null;
+  createdAt: number;
+}): Promise<UploadResult> {
+  const form = new FormData();
+  const ext = params.type === "video" ? "mp4" : "webp";
+  form.append("file", params.file, `restore.${ext}`);
+  if (params.type === "image" && params.original) {
+    form.append("original", params.original, "original.webp");
+  }
+  form.append("type", params.type);
+  if (params.annotations) form.append("annotations", JSON.stringify(params.annotations));
+  form.append("title", params.title);
+  // Giữ nguyên thời điểm tạo cũ để mục khôi phục nằm đúng mốc thời gian của nó trong thư
+  // viện. Worker chưa cập nhật sẽ bỏ qua trường này → mục mang ngày khôi phục, không lỗi.
+  form.append("createdAt", String(params.createdAt));
+  return postUpload(form);
+}
+
 async function postUpload(form: FormData): Promise<UploadResult> {
   const res = await fetchRetry(`${WORKER_URL}/api/upload`, {
     method: "POST",

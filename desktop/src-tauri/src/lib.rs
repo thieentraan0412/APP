@@ -1,3 +1,4 @@
+mod archive;
 mod capture;
 mod ffmpeg;
 mod record;
@@ -279,7 +280,12 @@ pub fn run() {
             remove_temp,
             save_video_to_path,
             trim_video,
-            toggle_recording_cmd
+            toggle_recording_cmd,
+            archive::archive_save,
+            archive::archive_write_text,
+            archive::archive_read_text,
+            archive::archive_read_file,
+            archive::archive_file_size
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

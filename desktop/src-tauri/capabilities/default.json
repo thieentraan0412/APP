@@ -15,6 +15,7 @@
     "process:allow-restart",
     "notification:default",
     "dialog:allow-save",
+    "dialog:allow-open",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled",

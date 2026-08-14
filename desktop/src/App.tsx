@@ -31,7 +31,9 @@ import {
   type LibraryItem,
   type UsageStats,
   type StorageOverview,
+  type StorageItem,
 } from "./lib/api";
+import { pickFolder, archiveItems, scanArchive, restoreEntries } from "./lib/archive";
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -41,6 +43,9 @@ type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage" | 
 
 const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3", pause: "Control+Shift+H", regionRecord: "Control+Shift+4" };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
+// Trần độ dài một phiên quay. Rust mới là bên thực thi (MAX_RECORD_MS trong record.rs) —
+// hằng số này chỉ để hiển thị; sửa thì phải sửa cả hai cho khớp.
+const MAX_RECORD_SECONDS = 300;
 
 const SidebarS = { width: 20, height: 20, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
 
@@ -172,6 +177,8 @@ function App() {
   const [storageError, setStorageError] = useState<string | null>(null);
   const [orphan, setOrphan] = useState<{ count: number; bytes: number } | null>(null);
   const [syncing, setSyncing] = useState(false);
+  // Tiến độ lưu về máy / khôi phục (null = không chạy)
+  const [archiveProgress, setArchiveProgress] = useState<{ title: string; done: number; total: number; label: string } | null>(null);
 
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
 
@@ -301,6 +308,8 @@ function App() {
       listen("recording-stopped", () => { setRecording(false); setRecordPaused(false); }),
       listen("recording-paused", () => { setRecordPaused(true); }),
       listen("recording-resumed", () => { setRecordPaused(false); }),
+      // Rust vừa tự dừng vì chạm trần 5 phút — nói rõ để người dùng không tưởng app lỗi.
+      listen("recording-limit", () => showToast(`Đã quay đủ ${fmtTime(MAX_RECORD_SECONDS)} — tự động dừng`)),
       listen<string>("video-ready", (e) => videoReadyHandlerRef.current(e.payload)),
       listen<string>("video-error", (e) => {
         setRecording(false);
@@ -401,7 +410,9 @@ function App() {
       return;
     }
     if (recordPaused) return; // đang tạm dừng: giữ nguyên số giây, ngừng đếm
-    const t = window.setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+    // Chặn ở trần: Rust dừng đúng mốc 5:00 nhưng sự kiện "recording-stopped" về sau đó vài
+    // nhịp — không kẹp thì banner kịp nhảy 5:01 rồi mới tắt.
+    const t = window.setInterval(() => setRecordSeconds((s) => Math.min(s + 1, MAX_RECORD_SECONDS)), 1000);
     return () => window.clearInterval(t);
   }, [recording, recordPaused]);
 
@@ -802,6 +813,88 @@ function App() {
     }
   }
 
+  // Lưu về máy rồi xoá trên cloud. Điểm mấu chốt: chỉ xoá đúng những mục đã tải xong
+  // (r.saved), mục nào lỗi vẫn nằm nguyên trên cloud — không bao giờ xoá thứ chưa có bản sao.
+  async function handleArchiveItems(items: StorageItem[]): Promise<boolean> {
+    const bytes = items.reduce((s, it) => s + (it.bytes ?? 0), 0);
+    const dir = await pickFolder("Chọn thư mục lưu bản sao trước khi xoá");
+    if (!dir) return false;
+
+    const ok = await askConfirm(
+      `Tải ${items.length} mục (${fmtBytes(bytes)}) về "${dir}" rồi xoá trên cloud? ` +
+        `Khôi phục lại được từ thư mục này, nhưng link chia sẻ cũ sẽ hỏng vĩnh viễn.`
+    );
+    if (!ok) return false;
+
+    setArchiveProgress({ title: "Đang tải về máy…", done: 0, total: items.length, label: "" });
+    try {
+      const r = await archiveItems(dir, items, (done, total, label) =>
+        setArchiveProgress({ title: "Đang tải về máy…", done, total, label })
+      );
+
+      if (r.saved.length === 0) {
+        showToast(`Không tải được mục nào — chưa xoá gì. ${r.failed[0]?.error ?? ""}`);
+        return false;
+      }
+
+      setArchiveProgress({ title: "Đang xoá trên cloud…", done: r.saved.length, total: items.length, label: "" });
+      const del = await purgeIds(r.saved.map((e) => e.id));
+
+      const parts = [`Đã lưu ${r.saved.length} mục vào máy · giải phóng ${fmtBytes(del.bytesFreed)}`];
+      // Nói rõ số mục lỗi: chúng vẫn còn trên cloud, người dùng cần biết để làm lại.
+      if (r.failed.length > 0) parts.push(`${r.failed.length} mục lỗi (giữ nguyên trên cloud)`);
+      showToast(parts.join(" · "));
+      await afterPurge();
+      return true;
+    } catch (err) {
+      showToast("Lưu về máy lỗi: " + String(err));
+      return false;
+    } finally {
+      setArchiveProgress(null);
+    }
+  }
+
+  async function handleRestore() {
+    const dir = await pickFolder("Chọn thư mục kho đã lưu trước đó");
+    if (!dir) return;
+
+    setArchiveProgress({ title: "Đang đọc thư mục…", done: 0, total: 0, label: "" });
+    try {
+      const scan = await scanArchive(dir);
+      if (scan.entries.length === 0) {
+        showToast(
+          scan.missing.length > 0
+            ? `Thư mục có danh sách nhưng thiếu file (${scan.missing.length} mục) — không khôi phục được`
+            : "Thư mục này không phải kho lưu trữ của app (thiếu captureshare-archive.json)"
+        );
+        return;
+      }
+
+      const bytes = scan.entries.reduce((s, e) => s + (e.bytes || 0), 0);
+      const warn = scan.missing.length > 0 ? ` (${scan.missing.length} mục thiếu file sẽ bỏ qua)` : "";
+      const ok = await askConfirm(
+        `Khôi phục ${scan.entries.length} mục (${fmtBytes(bytes)}) lên cloud?${warn} ` +
+          `Mỗi mục sẽ có link chia sẻ MỚI, link cũ không sống lại.`
+      );
+      if (!ok) return;
+
+      setArchiveProgress({ title: "Đang khôi phục…", done: 0, total: scan.entries.length, label: "" });
+      const r = await restoreEntries(dir, scan.entries, (done, total, label) =>
+        setArchiveProgress({ title: "Đang khôi phục…", done, total, label })
+      );
+
+      const parts = [`Đã khôi phục ${r.restored} mục`];
+      if (r.failed.length > 0) parts.push(`${r.failed.length} mục lỗi`);
+      showToast(parts.join(" · "));
+      // File dưới máy giữ nguyên: khôi phục xong vẫn còn bản sao, người dùng tự xoá khi muốn.
+      await afterPurge();
+    } catch (err) {
+      showToast("Khôi phục lỗi: " + String(err));
+    } finally {
+      setArchiveProgress(null);
+    }
+  }
+
   async function handlePurgeOrphans() {
     if (!orphan || orphan.count === 0) return;
     const ok = await askConfirm(
@@ -1176,11 +1269,11 @@ function App() {
               {recording && (
                 <div className={"rec-banner" + (recordPaused ? " paused" : "") + (recordSeconds >= VIDEO_WARN_SECONDS ? " warn" : "")}>
                   {recordPaused ? (
-                    <>⏸ Đã tạm dừng {fmtTime(recordSeconds)} — nhấn <kbd>{prettyKey(shortcuts.pause)}</kbd> để quay tiếp · <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng</>
+                    <>⏸ Đã tạm dừng {fmtTime(recordSeconds)}/{fmtTime(MAX_RECORD_SECONDS)} — nhấn <kbd>{prettyKey(shortcuts.pause)}</kbd> để quay tiếp · <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng</>
                   ) : (
-                    <>● Đang quay {fmtTime(recordSeconds)} — nhấn <kbd>{prettyKey(shortcuts.pause)}</kbd> để tạm dừng · <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng</>
+                    <>● Đang quay {fmtTime(recordSeconds)}/{fmtTime(MAX_RECORD_SECONDS)} — nhấn <kbd>{prettyKey(shortcuts.pause)}</kbd> để tạm dừng · <kbd>{prettyKey(shortcuts.record)}</kbd> để dừng</>
                   )}
-                  {!recordPaused && recordSeconds >= VIDEO_WARN_SECONDS && " ⚠️ video đã khá dài, cân nhắc dừng"}
+                  {!recordPaused && recordSeconds >= VIDEO_WARN_SECONDS && ` ⚠️ tự động dừng ở ${fmtTime(MAX_RECORD_SECONDS)}`}
                 </div>
               )}
               {error && <p className="error" style={{ margin: "0.5rem 1.5rem 0" }}>Lỗi: {error}</p>}
@@ -1217,6 +1310,9 @@ function App() {
               onPurgeOrphans={handlePurgeOrphans}
               onPurgeRange={handlePurgeRange}
               onPurgeIds={handlePurgeIds}
+              onArchiveItems={handleArchiveItems}
+              onRestore={handleRestore}
+              progress={archiveProgress}
             />
           )}
           {screen === "settings" && (
