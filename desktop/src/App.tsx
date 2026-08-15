@@ -9,6 +9,7 @@ import { EditorScreen } from "./screens/EditorScreen";
 import { LibraryScreen } from "./screens/LibraryScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 import { ConfirmModal } from "./components/ConfirmModal";
+import { ProgressModal } from "./components/ProgressModal";
 import { UsageScreen } from "./screens/UsageScreen";
 import { DataScreen } from "./screens/DataScreen";
 import { AuthScreen } from "./screens/AuthScreen";
@@ -28,12 +29,27 @@ import {
   purgeRange,
   purgeIds,
   purgeOrphans,
+  getArchiveStores,
+  putArchiveStore,
+  deleteArchiveStore,
+  getDailyUsage,
+  type DailyUsageReport,
   type LibraryItem,
   type UsageStats,
   type StorageOverview,
   type StorageItem,
+  type ArchiveStore,
 } from "./lib/api";
-import { pickFolder, archiveItems, scanArchive, restoreEntries } from "./lib/archive";
+import {
+  pickFolder,
+  archiveItems,
+  scanArchive,
+  restoreEntries,
+  archiveDirState,
+  openArchiveDir,
+  deviceName,
+  readArchiveManifest,
+} from "./lib/archive";
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
@@ -141,6 +157,8 @@ function fmtTime(sec: number): string {
 // (Chỉ ảnh từng sửa mới tải lại; ảnh khác vẫn dùng cache → không tốn thêm ops.)
 const IMG_VER_KEY = "img-versions";
 const LIB_CACHE_KEY = "lib-cache"; // danh sách thư viện gần nhất, để hiện khi mạng chập chờn
+// Sổ kho lưu trữ nằm trên D1 chứ không phải localStorage: người dùng đứng ở máy B vẫn phải
+// tra được nội dung đã xoá đang nằm ở máy A, thư mục nào.
 // Bump khi cần buộc nạp lại TẤT CẢ thumbnail ảnh (vd worker đổi Content-Type png→webp).
 const IMG_FMT = 2;
 function loadImgVersions(): Record<string, number> {
@@ -165,9 +183,10 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [ffmpegDl, setFfmpegDl] = useState<number | null>(null); // null=không tải, -1=không rõ %, 0..100=phần trăm
   // recPopup đã bỏ — thông báo quay được chuyển sang toast hệ thống (Rust)
-  const [confirm, setConfirm] = useState<{ message: string; onConfirm: () => void; onCancel?: () => void } | null>(null);
+  const [confirm, setConfirm] = useState<{ message: string; confirmLabel?: string; icon?: string; danger?: boolean; onConfirm: () => void; onCancel?: () => void } | null>(null);
   const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [usageLoading, setUsageLoading] = useState(false);
+  const [dailyUsage, setDailyUsage] = useState<DailyUsageReport | null>(null);
   const [usageWarnings, setUsageWarnings] = useState<string[]>([]);
   const [warnDismissed, setWarnDismissed] = useState(false);
 
@@ -178,7 +197,37 @@ function App() {
   const [orphan, setOrphan] = useState<{ count: number; bytes: number } | null>(null);
   const [syncing, setSyncing] = useState(false);
   // Tiến độ lưu về máy / khôi phục (null = không chạy)
-  const [archiveProgress, setArchiveProgress] = useState<{ title: string; done: number; total: number; label: string } | null>(null);
+  const [archiveProgress, setArchiveProgress] = useState<{ title: string; done: number; total: number; label: string; bytesDone?: number; bytesTotal?: number } | null>(null);
+  const [archiveStores, setArchiveStores] = useState<ArchiveStore[]>([]);
+  const [device, setDevice] = useState("");
+  // Thư mục có thể bị đổi tên / xoá / tháo ổ ngoài sau khi lưu. Chỉ dò được kho nằm trên
+  // CHÍNH máy này; kho của máy khác thì đành tin số liệu trong sổ.
+  const [dirStates, setDirStates] = useState<Record<string, { exists: boolean; items: number }>>({});
+
+  useEffect(() => { deviceName().then(setDevice).catch(() => {}); }, []);
+
+  async function loadArchiveStores() {
+    try {
+      setArchiveStores(await getArchiveStores());
+    } catch {
+      // Mất mạng thì thôi, phần còn lại của trang vẫn dùng được — không dựng cờ lỗi đỏ.
+    }
+  }
+
+  useEffect(() => { loadArchiveStores(); }, []);
+
+  useEffect(() => {
+    if (!device) return;
+    let alive = true;
+    (async () => {
+      const next: Record<string, { exists: boolean; items: number }> = {};
+      for (const s of archiveStores) {
+        if (s.device === device) next[s.dir] = await archiveDirState(s.dir);
+      }
+      if (alive) setDirStates(next);
+    })();
+    return () => { alive = false; };
+  }, [archiveStores, device]);
 
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
 
@@ -725,10 +774,15 @@ function App() {
     return `${Math.round(bytes)} B`;
   }
 
-  function askConfirm(message: string): Promise<boolean> {
+  /** `opts` bỏ trống = hộp thoại xoá (đỏ, nhãn "Xoá") như mọi chỗ đang gọi. */
+  function askConfirm(
+    message: string,
+    opts?: { confirmLabel?: string; icon?: string; danger?: boolean }
+  ): Promise<boolean> {
     return new Promise((resolve) => {
       setConfirm({
         message,
+        ...opts,
         onCancel: () => resolve(false),
         onConfirm: () => { setConfirm(null); resolve(true); },
       });
@@ -757,18 +811,35 @@ function App() {
     await Promise.all([loadStorage(), reloadLibrary(), loadUsageStats(true)]);
   }
 
-  async function handleSyncStorage() {
+  /**
+   * Làm mới trang Quản lý dữ liệu. Gộp hai việc trước đây tách làm hai nút:
+   *   1. Quét R2 đối chiếu dung lượng thật + tìm file rác  (POST /api/storage/sync)
+   *   2. Đọc lại thống kê theo ngày từ D1                   (GET  /api/storage)
+   *
+   * Tách hai nút chỉ gây rối vì người dùng không thể biết khi nào cần bấm cái nào, trong
+   * khi bước quét chỉ tốn thêm 1 Class A cho mỗi 1.000 object và chỉ ghi D1 khi thật sự
+   * có sai lệch. Quét hỏng (mạng chập chờn) vẫn đọc tiếp thống kê — thà số hơi cũ còn hơn
+   * trang trắng.
+   */
+  async function handleRefreshStorage() {
     setSyncing(true);
+    let note = "";
     try {
       const r = await syncStorage();
       setOrphan(r.orphan);
-      await loadStorage();
-      const parts = [`Đã cập nhật ${r.updated} mục`];
+      const parts: string[] = [];
+      if (r.updated > 0) parts.push(`cập nhật ${r.updated} mục`);
       if (r.orphan.count > 0) parts.push(`${r.orphan.count} file rác (${fmtBytes(r.orphan.bytes)})`);
       if (r.missingFiles > 0) parts.push(`${r.missingFiles} mục thiếu file`);
-      showToast(parts.join(" · "));
+      note = parts.length > 0 ? " · " + parts.join(" · ") : "";
+    } catch {
+      note = " · chưa đối chiếu được R2";
+    }
+    try {
+      await loadStorage();
+      showToast("Đã làm mới" + note);
     } catch (err) {
-      showToast("Đồng bộ lỗi: " + String(err));
+      showToast("Làm mới lỗi: " + String(err));
     } finally {
       setSyncing(false);
     }
@@ -822,20 +893,26 @@ function App() {
 
     const ok = await askConfirm(
       `Tải ${items.length} mục (${fmtBytes(bytes)}) về "${dir}" rồi xoá trên cloud? ` +
-        `Khôi phục lại được từ thư mục này, nhưng link chia sẻ cũ sẽ hỏng vĩnh viễn.`
+        `Khôi phục lại được từ thư mục này, và mỗi mục sẽ xin lại đúng link chia sẻ cũ.`,
+      // Vẫn là hành động phá huỷ (xoá trên cloud) nên giữ nút đỏ, chỉ đổi nhãn cho đúng việc.
+      { confirmLabel: "Lưu về máy & xoá", icon: "💾" }
     );
     if (!ok) return false;
 
     setArchiveProgress({ title: "Đang tải về máy…", done: 0, total: items.length, label: "" });
     try {
-      const r = await archiveItems(dir, items, (done, total, label) =>
-        setArchiveProgress({ title: "Đang tải về máy…", done, total, label })
+      const r = await archiveItems(dir, items, (p) =>
+        setArchiveProgress({ title: "Đang tải về máy…", ...p })
       );
 
       if (r.saved.length === 0) {
         showToast(`Không tải được mục nào — chưa xoá gì. ${r.failed[0]?.error ?? ""}`);
         return false;
       }
+
+      // Nhớ thư mục ngay khi có file nằm trong đó, kể cả nếu bước xoá dưới đây hỏng —
+      // đã có bản sao trên máy thì phải tìm lại được.
+      await syncArchiveDir(dir);
 
       setArchiveProgress({ title: "Đang xoá trên cloud…", done: r.saved.length, total: items.length, label: "" });
       const del = await purgeIds(r.saved.map((e) => e.id));
@@ -854,8 +931,51 @@ function App() {
     }
   }
 
-  async function handleRestore() {
-    const dir = await pickFolder("Chọn thư mục kho đã lưu trước đó");
+  // Đẩy cả manifest lên sổ trên cloud. Gửi manifest chứ không gửi riêng phần vừa lưu, để
+  // sổ luôn phản ánh đúng nội dung thật của thư mục — kể cả khi người dùng tự xoá bớt file.
+  async function syncArchiveDir(dir: string) {
+    try {
+      const entries = await readArchiveManifest(dir);
+      await putArchiveStore({
+        device: device || (await deviceName()),
+        dir,
+        items: entries.map((e) => ({
+          id: e.id,
+          type: e.type,
+          title: e.title,
+          bytes: e.bytes,
+          createdAt: e.createdAt,
+          archivedAt: e.archivedAt,
+          file: e.file,
+        })),
+      });
+      await loadArchiveStores();
+    } catch (err) {
+      // Ghi sổ hỏng không được làm hỏng việc lưu — file dưới máy vẫn còn, khôi phục vẫn được.
+      showToast("Lưu xong nhưng chưa ghi được vào sổ kho: " + String(err));
+    }
+  }
+
+  async function forgetArchiveStore(id: string) {
+    try {
+      await deleteArchiveStore(id);
+      await loadArchiveStores();
+    } catch (err) {
+      showToast("Không bỏ được khỏi sổ: " + String(err));
+    }
+  }
+
+  async function handleOpenArchiveDir(dir: string) {
+    try {
+      await openArchiveDir(dir);
+    } catch (err) {
+      showToast("Không mở được thư mục: " + String(err));
+    }
+  }
+
+  /** `preset` = khôi phục thẳng từ thư mục đã nhớ, bỏ qua bước chọn thư mục. */
+  async function handleRestore(preset?: string) {
+    const dir = preset ?? (await pickFolder("Chọn thư mục kho đã lưu trước đó"));
     if (!dir) return;
 
     setArchiveProgress({ title: "Đang đọc thư mục…", done: 0, total: 0, label: "" });
@@ -870,21 +990,38 @@ function App() {
         return;
       }
 
+      // Thư mục tự chọn mà đúng là kho thì nhớ luôn — lần sau bấm một phát là xong.
+      await syncArchiveDir(dir);
+
       const bytes = scan.entries.reduce((s, e) => s + (e.bytes || 0), 0);
       const warn = scan.missing.length > 0 ? ` (${scan.missing.length} mục thiếu file sẽ bỏ qua)` : "";
+      // Khôi phục KHÔNG xoá gì cả — dùng nút xanh "Khôi phục", đừng để nút đỏ ghi "Xoá"
+      // làm người dùng tưởng bấm vào là mất dữ liệu rồi không dám bấm.
       const ok = await askConfirm(
         `Khôi phục ${scan.entries.length} mục (${fmtBytes(bytes)}) lên cloud?${warn} ` +
-          `Mỗi mục sẽ có link chia sẻ MỚI, link cũ không sống lại.`
+          `Mỗi mục xin lại link chia sẻ cũ; mục nào có id đã bị dùng lại thì nhận link mới. ` +
+          `File dưới máy vẫn giữ nguyên.`,
+        { confirmLabel: "Khôi phục", icon: "☁️", danger: false }
       );
       if (!ok) return;
 
       setArchiveProgress({ title: "Đang khôi phục…", done: 0, total: scan.entries.length, label: "" });
-      const r = await restoreEntries(dir, scan.entries, (done, total, label) =>
-        setArchiveProgress({ title: "Đang khôi phục…", done, total, label })
+      const r = await restoreEntries(dir, scan.entries, (p) =>
+        setArchiveProgress({ title: "Đang khôi phục…", ...p })
       );
 
       const parts = [`Đã khôi phục ${r.restored} mục`];
-      if (r.failed.length > 0) parts.push(`${r.failed.length} mục lỗi`);
+      // Nói rõ bao nhiêu mục giữ được link cũ: người dùng cần biết link nào còn gửi đi được.
+      if (r.restored > 0) {
+        const renewed = r.restored - r.keptLinks;
+        parts.push(
+          renewed === 0
+            ? "giữ nguyên link cũ"
+            : `${r.keptLinks} giữ link cũ · ${renewed} nhận link mới (id đã bị dùng)`
+        );
+      }
+      // Kèm luôn lý do của mục lỗi đầu tiên — chỉ báo "N mục lỗi" thì không ai biết đường sửa.
+      if (r.failed.length > 0) parts.push(`${r.failed.length} mục lỗi: ${r.failed[0].error}`);
       showToast(parts.join(" · "));
       // File dưới máy giữ nguyên: khôi phục xong vẫn còn bản sao, người dùng tự xoá khi muốn.
       await afterPurge();
@@ -914,8 +1051,14 @@ function App() {
   async function loadUsageStats(silent = false) {
     if (!silent) setUsageLoading(true);
     try {
-      const stats = await getUsageStats();
+      // Hai nguồn độc lập: getUsageStats quét dung lượng thật, getDailyUsage đọc sổ đếm
+      // request/thao tác. Chạy song song để bấm "Làm mới" một phát là cả trang tươi lại.
+      const [stats, daily] = await Promise.all([
+        getUsageStats(),
+        getDailyUsage(30).catch(() => null), // sổ đếm hỏng không được làm chết cả trang
+      ]);
       setUsageStats(stats);
+      setDailyUsage(daily);
       const warns = checkUsageWarnings(stats);
       setUsageWarnings(warns);
       if (warns.length > 0) setWarnDismissed(false);
@@ -1146,8 +1289,23 @@ function App() {
   const ConfirmOverlay = confirm ? (
     <ConfirmModal
       message={confirm.message}
+      confirmLabel={confirm.confirmLabel}
+      icon={confirm.icon}
+      danger={confirm.danger}
       onConfirm={confirm.onConfirm}
       onCancel={() => { confirm.onCancel?.(); setConfirm(null); }}
+    />
+  ) : null;
+
+  // Đặt cùng cấp với ConfirmOverlay để nổi trên mọi màn hình, không bị trôi theo vùng cuộn.
+  const ProgressOverlay = archiveProgress ? (
+    <ProgressModal
+      title={archiveProgress.title}
+      done={archiveProgress.done}
+      total={archiveProgress.total}
+      label={archiveProgress.label}
+      bytesDone={archiveProgress.bytesDone}
+      bytesTotal={archiveProgress.bytesTotal}
     />
   ) : null;
 
@@ -1213,6 +1371,7 @@ function App() {
         />
 
         {DownloadOverlay}
+        {ProgressOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
         {QrModal}
@@ -1228,6 +1387,7 @@ function App() {
         {toast && <div className="toast">{toast}</div>}
 
         {DownloadOverlay}
+        {ProgressOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
         {QrModal}
@@ -1294,6 +1454,7 @@ function App() {
           {screen === "usage" && (
             <UsageScreen
               stats={usageStats}
+              daily={dailyUsage}
               loading={usageLoading}
               onRefresh={openUsage}
             />
@@ -1305,14 +1466,19 @@ function App() {
               error={storageError}
               orphan={orphan}
               syncing={syncing}
-              onRefresh={loadStorage}
-              onSync={handleSyncStorage}
+              onRefresh={handleRefreshStorage}
               onPurgeOrphans={handlePurgeOrphans}
               onPurgeRange={handlePurgeRange}
               onPurgeIds={handlePurgeIds}
               onArchiveItems={handleArchiveItems}
               onRestore={handleRestore}
               progress={archiveProgress}
+              archiveStores={archiveStores}
+              device={device}
+              dirStates={dirStates}
+              onOpenArchiveDir={handleOpenArchiveDir}
+              onForgetArchiveStore={forgetArchiveStore}
+              onRefreshArchives={loadArchiveStores}
             />
           )}
           {screen === "settings" && (
@@ -1341,6 +1507,7 @@ function App() {
         {toast && <div className="toast">{toast}</div>}
 
         {DownloadOverlay}
+        {ProgressOverlay}
         {ConfirmOverlay}
         {UpdateOverlay}
         {QrModal}

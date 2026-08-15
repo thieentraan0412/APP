@@ -285,7 +285,10 @@ pub fn run() {
             archive::archive_write_text,
             archive::archive_read_text,
             archive::archive_read_file,
-            archive::archive_file_size
+            archive::archive_file_size,
+            archive::archive_dir_state,
+            archive::archive_open_dir,
+            archive::device_name
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

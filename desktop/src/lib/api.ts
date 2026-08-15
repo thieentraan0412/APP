@@ -17,6 +17,9 @@ if (!WORKER_URL || !API_KEY) {
 export interface UploadResult {
   id: string;
   url: string;
+  /** Khôi phục: true = xin lại được id cũ nên link chia sẻ cũ sống lại. Worker đời cũ
+   *  không trả trường này → coi như không giữ được, chỉ ảnh hưởng câu thông báo. */
+  keptId?: boolean;
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -100,9 +103,13 @@ export async function uploadVideo(blob: Blob): Promise<UploadResult> {
 
 /**
  * Tải một mục từ kho lưu trữ dưới máy trở lại cloud (khôi phục).
- * Đây là mục MỚI: id và link chia sẻ mới, link cũ đã chết từ lúc xoá không sống lại được.
+ * Xin lại đúng id cũ để link chia sẻ cũ sống lại. Id nào đã có chủ (thường do khôi phục
+ * cùng thư mục kho lần thứ hai) thì worker tự cấp id mới và báo qua `keptId` — không bao
+ * giờ giẫm lên mục đang có.
  */
 export async function restoreUpload(params: {
+  /** Id cũ ghi trong manifest; worker chỉ dùng lại nếu id đó còn trống. */
+  id: string;
   file: Blob;
   original: Blob | null;
   type: "image" | "video";
@@ -113,6 +120,7 @@ export async function restoreUpload(params: {
   const form = new FormData();
   const ext = params.type === "video" ? "mp4" : "webp";
   form.append("file", params.file, `restore.${ext}`);
+  form.append("id", params.id);
   if (params.type === "image" && params.original) {
     form.append("original", params.original, "original.webp");
   }
@@ -295,6 +303,137 @@ export interface StorageItem {
   bytes: number | null;
   url: string;
   fileUrl: string;
+}
+
+// ---------- Mức đã tiêu theo ngày (worker tự đếm) ----------
+export interface DailyUsage {
+  day: string; // yyyy-mm-dd theo UTC
+  requests: number;
+  classA: number;
+  classB: number;
+  rowsWritten: number;
+  updatedAt: number;
+}
+
+export interface DailyUsageReport {
+  /** Ngày UTC hiện tại — dùng để biết dòng nào là "hôm nay" theo mốc Cloudflare. */
+  today: string;
+  timezone: string;
+  days: DailyUsage[];
+}
+
+export async function getDailyUsage(days = 30): Promise<DailyUsageReport> {
+  const res = await fetchRetry(`${WORKER_URL}/api/usage/daily?days=${days}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Không tải được mức đã dùng (HTTP ${res.status})`);
+  return res.json();
+}
+
+// ---------- Sổ kho lưu trữ dưới máy (dùng chung mọi máy) ----------
+export interface ArchiveStore {
+  id: string;
+  /** Tên máy đang giữ thư mục kho này */
+  device: string;
+  dir: string;
+  items: number;
+  bytes: number;
+  updatedAt: number;
+}
+
+export interface ArchivedItem {
+  itemId: string;
+  storeId: string;
+  device: string;
+  dir: string;
+  type: "image" | "video";
+  title: string | null;
+  bytes: number | null;
+  createdAt: number | null;
+  archivedAt: number | null;
+  file: string | null;
+}
+
+/** Mọi kho của mọi máy. Máy nào đăng nhập cùng tài khoản cũng thấy như nhau. */
+export async function getArchiveStores(): Promise<ArchiveStore[]> {
+  const res = await fetchRetry(`${WORKER_URL}/api/archives`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Không tải được sổ kho (HTTP ${res.status})`);
+  const data = await res.json();
+  return Array.isArray(data?.stores) ? data.stores : [];
+}
+
+/** Các mục trong một kho (`store`), hoặc tra một mục đang nằm ở những kho nào (`item`). */
+export async function getArchivedItems(q: { store?: string; item?: string }): Promise<ArchivedItem[]> {
+  const qs = q.store ? `store=${encodeURIComponent(q.store)}` : `item=${encodeURIComponent(q.item ?? "")}`;
+  const res = await fetchRetry(`${WORKER_URL}/api/archives/items?${qs}`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Không tra được kho (HTTP ${res.status})`);
+  const data = await res.json();
+  return Array.isArray(data?.items) ? data.items : [];
+}
+
+/** Ghi nhận kho lên cloud sau khi lưu về máy. Gửi cả manifest để tra ngược từng mục. */
+export async function putArchiveStore(params: {
+  device: string;
+  dir: string;
+  items: Array<{
+    id: string; type: "image" | "video"; title: string;
+    bytes: number; createdAt: number; archivedAt: number; file: string;
+  }>;
+}): Promise<{ id: string }> {
+  const res = await fetchRetry(`${WORKER_URL}/api/archives`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error(`Không ghi được sổ kho (HTTP ${res.status})`);
+  return res.json();
+}
+
+/**
+ * Nhận cả id trần lẫn link dán vào (https://…/v/abc123XYz0, /file/abc123XYz0?v=2).
+ * Trả null nếu không moi ra được id đúng khuôn 10 ký tự.
+ */
+export function parseItemId(raw: string): string | null {
+  const s = raw.trim();
+  if (!s) return null;
+  if (/^[0-9A-Za-z]{10}$/.test(s)) return s;
+  // Lấy đoạn cuối đường dẫn, bỏ query/hash rồi thử lại. Bắt buộc có "/" ngay trước id để
+  // đoạn cuối phải dài ĐÚNG 10 ký tự — không thì link tận cùng bằng đoạn 11 ký tự sẽ bị
+  // cắt lấy 10 ký tự cuối, tra ra một id khác rồi báo "đã xoá", sai mà nghe rất thật.
+  const m = s.replace(/[?#].*$/, "").replace(/\/+$/, "").match(/\/([0-9A-Za-z]{10})$/);
+  return m ? m[1] : null;
+}
+
+export interface IdLookup {
+  id: string;
+  /** Còn trên cloud hay không. null = đã xoá, link cũ đang chết. */
+  live: ItemDetail | null;
+  /** Các kho dưới máy đang giữ bản sao của mục này. */
+  copies: ArchivedItem[];
+}
+
+/**
+ * Tra một id: còn sống thì trả kèm link, đã xoá thì trả các kho đang giữ bản sao.
+ * Hai câu hỏi này độc lập nhau nên hỏi song song; mục còn sống vẫn có thể đồng thời có
+ * bản sao dưới máy (lưu về máy nhưng chưa xoá, hoặc đã khôi phục lại).
+ */
+export async function lookupId(id: string): Promise<IdLookup> {
+  const [live, copies] = await Promise.all([
+    (async (): Promise<ItemDetail | null> => {
+      const res = await fetchRetry(`${WORKER_URL}/api/items/${id}`, { headers: authHeaders() });
+      if (res.status === 404) return null; // đã xoá — đây là câu trả lời, không phải lỗi
+      if (!res.ok) throw new Error(`Không tra được mục (HTTP ${res.status})`);
+      return res.json();
+    })(),
+    getArchivedItems({ item: id }),
+  ]);
+  return { id, live, copies };
+}
+
+export async function deleteArchiveStore(id: string): Promise<void> {
+  const res = await fetchRetry(`${WORKER_URL}/api/archives/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(`Không xoá được khỏi sổ (HTTP ${res.status})`);
 }
 
 export interface StorageItemsPage {

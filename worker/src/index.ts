@@ -34,9 +34,18 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // phiên đăng nhập sống 
 
 function makeId(len = 10): string {
   const chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const bytes = crypto.getRandomValues(new Uint8Array(len));
+  // 256 không chia hết cho 62, nên lấy thẳng `byte % 62` làm 8 ký tự đầu bảng ra nhiều hơn
+  // ~25% — id bớt ngẫu nhiên, xác suất trùng nhích lên. Bỏ các byte rơi vào phần dư
+  // (>= 248) để mọi ký tự có cơ hội bằng nhau. Bảng ký tự giữ nguyên nên id cũ vẫn hợp lệ.
+  const limit = 256 - (256 % chars.length);
   let out = "";
-  for (let i = 0; i < len; i++) out += chars[bytes[i] % chars.length];
+  while (out.length < len) {
+    for (const b of crypto.getRandomValues(new Uint8Array(len))) {
+      if (b >= limit) continue; // byte lệch — bốc lại, không dùng
+      out += chars[b % chars.length];
+      if (out.length === len) break;
+    }
+  }
   return out;
 }
 
@@ -202,6 +211,93 @@ function ensureBytesColumn(env: Env): Promise<void> {
   return bytesColumnPromise;
 }
 
+// Bảng sổ kho tạo muộn hơn bảng items, nên database đã dùng từ trước sẽ chưa có. Tạo một
+// lần cho mỗi isolate rồi nhớ lại, giống cách ensureBytesColumn làm.
+let archiveTablesPromise: Promise<void> | null = null;
+function ensureArchiveTables(env: Env): Promise<void> {
+  if (!archiveTablesPromise) {
+    archiveTablesPromise = env.DB.batch([
+      env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS archive_stores (
+           id TEXT PRIMARY KEY, device TEXT NOT NULL, dir TEXT NOT NULL,
+           items INTEGER NOT NULL, bytes INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+           UNIQUE (device, dir))`
+      ),
+      env.DB.prepare(
+        `CREATE TABLE IF NOT EXISTS archive_items (
+           item_id TEXT NOT NULL, store_id TEXT NOT NULL, type TEXT NOT NULL, title TEXT,
+           bytes INTEGER, created_at INTEGER, archived_at INTEGER, file TEXT,
+           PRIMARY KEY (item_id, store_id))`
+      ),
+      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_archive_items_store ON archive_items(store_id)`),
+      env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_archive_items_item ON archive_items(item_id)`),
+    ])
+      .then(() => undefined)
+      .catch((err) => {
+        archiveTablesPromise = null; // cho phép thử lại ở request sau
+        throw err;
+      });
+  }
+  return archiveTablesPromise;
+}
+
+// ---------- Sổ đếm hạn mức theo ngày ----------
+// Cloudflare không cho worker tự đọc mức đã tiêu của chính nó, nên muốn biết hôm nay đã
+// dùng bao nhiêu thì phải tự đếm. Mỗi request cộng đúng một dòng UPSERT vào ngày hôm đó.
+//
+// Mốc ngày theo UTC vì hạn mức ngày của Cloudflare cũng reset lúc 00:00 UTC — cắt theo giờ
+// VN sẽ lệch 7 tiếng và báo "còn dư" trong khi thực tế đã hết.
+interface Meter {
+  requests: number;
+  classA: number;
+  classB: number;
+  rowsWritten: number;
+}
+
+let usageTablePromise: Promise<void> | null = null;
+function ensureUsageTable(env: Env): Promise<void> {
+  if (!usageTablePromise) {
+    usageTablePromise = env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS usage_daily (
+         day TEXT PRIMARY KEY,
+         requests INTEGER NOT NULL DEFAULT 0,
+         class_a INTEGER NOT NULL DEFAULT 0,
+         class_b INTEGER NOT NULL DEFAULT 0,
+         rows_written INTEGER NOT NULL DEFAULT 0,
+         updated_at INTEGER NOT NULL)`
+    )
+      .run()
+      .then(() => undefined)
+      .catch((err) => {
+        usageTablePromise = null;
+        throw err;
+      });
+  }
+  return usageTablePromise;
+}
+
+function utcDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+async function flushMeter(env: Env, m: Meter): Promise<void> {
+  // Chính câu UPSERT này cũng là một row written — cộng luôn vào, không giấu.
+  const rowsWritten = m.rowsWritten + 1;
+  await ensureUsageTable(env);
+  await env.DB.prepare(
+    `INSERT INTO usage_daily (day, requests, class_a, class_b, rows_written, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(day) DO UPDATE SET
+       requests     = requests + excluded.requests,
+       class_a      = class_a + excluded.class_a,
+       class_b      = class_b + excluded.class_b,
+       rows_written = rows_written + excluded.rows_written,
+       updated_at   = excluded.updated_at`
+  )
+    .bind(utcDay(Date.now()), m.requests, m.classA, m.classB, rowsWritten, Date.now())
+    .run();
+}
+
 // items/<id>.webp | items/<id>.mp4 | items/<id>_orig.webp  ->  <id>
 function idFromKey(key: string): string | null {
   if (!key.startsWith("items/")) return null;
@@ -279,7 +375,10 @@ function asFile(v: File | string | null): File | null {
 }
 
 // Phục vụ file từ R2 có hỗ trợ HTTP Range (để tua video) + HEAD.
-async function serveR2(env: Env, key: string, mime: string, req: Request): Promise<Response> {
+async function serveR2(env: Env, key: string, mime: string, req: Request, meter: Meter): Promise<Response> {
+  // head và get đều là Class B. Video tải theo nhiều đoạn Range → mỗi đoạn vào đây một lần
+  // và tính thêm một Class B, nên bộ đếm này mới phản ánh đúng chi phí thật của video.
+  meter.classB += 1;
   const rangeHeader = req.headers.get("Range");
   let range: R2Range | undefined;
   if (rangeHeader) {
@@ -338,8 +437,8 @@ interface ItemRow {
   bytes: number | null; // tổng byte trên R2 (ảnh đã gộp + ảnh gốc); NULL = chưa đối chiếu
 }
 
-export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+const routes = {
+  async handle(req: Request, env: Env, meter: Meter): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
 
@@ -442,7 +541,10 @@ export default {
       const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
       const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
       const [r2, d1Result] = await Promise.all([
-        getR2Usage(env.BUCKET),
+        getR2Usage(env.BUCKET).then((u) => {
+          meter.classA += u.listOperations; // ListObjects là Class A
+          return u;
+        }),
         env.DB.prepare(
           `SELECT
              COUNT(*) AS total_items,
@@ -497,6 +599,180 @@ export default {
           },
         },
       });
+    }
+
+    // ---------- Mức đã tiêu theo ngày (sổ do worker tự đếm) ----------
+    if (req.method === "GET" && path === "/api/usage/daily") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureUsageTable(env);
+
+      const daysRaw = Number(url.searchParams.get("days"));
+      const days = Math.max(1, Math.min(90, Number.isFinite(daysRaw) && daysRaw > 0 ? daysRaw : 30));
+      const from = utcDay(Date.now() - (days - 1) * 86_400_000);
+
+      type Row = {
+        day: string; requests: number; class_a: number; class_b: number;
+        rows_written: number; updated_at: number;
+      };
+      const { results } = await env.DB.prepare(
+        `SELECT day, requests, class_a, class_b, rows_written, updated_at
+           FROM usage_daily WHERE day >= ? ORDER BY day DESC`
+      ).bind(from).all<Row>();
+
+      return json({
+        today: utcDay(Date.now()),
+        // Mốc ngày theo UTC, khớp với lúc Cloudflare reset hạn mức ngày.
+        timezone: "UTC",
+        days: (results || []).map((r) => ({
+          day: r.day,
+          requests: r.requests,
+          classA: r.class_a,
+          classB: r.class_b,
+          rowsWritten: r.rows_written,
+          updatedAt: r.updated_at,
+        })),
+      });
+    }
+
+    // ---------- Sổ kho lưu trữ dưới máy ----------
+    // Danh sách mọi kho của mọi máy, kèm các mục bên trong. Nhờ nó mà đứng ở máy B vẫn
+    // biết video đã xoá đang nằm ở máy A, thư mục nào.
+    if (req.method === "GET" && path === "/api/archives") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureArchiveTables(env);
+
+      type StoreRow = { id: string; device: string; dir: string; items: number; bytes: number; updated_at: number };
+      const stores = await env.DB.prepare(
+        `SELECT id, device, dir, items, bytes, updated_at FROM archive_stores
+          ORDER BY updated_at DESC`
+      ).all<StoreRow>();
+
+      return json({
+        stores: (stores.results || []).map((s) => ({
+          id: s.id,
+          device: s.device,
+          dir: s.dir,
+          items: s.items,
+          bytes: s.bytes,
+          updatedAt: s.updated_at,
+        })),
+      });
+    }
+
+    // Các mục bên trong một kho, hoặc tra ngược một mục đang nằm ở những kho nào.
+    if (req.method === "GET" && path === "/api/archives/items") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureArchiveTables(env);
+
+      const storeId = url.searchParams.get("store");
+      const itemId = url.searchParams.get("item");
+      if (!storeId && !itemId) return json({ error: "Thiếu store hoặc item" }, 400);
+
+      type Row = {
+        item_id: string; store_id: string; type: string; title: string | null;
+        bytes: number | null; created_at: number | null; archived_at: number | null;
+        file: string | null; device: string; dir: string;
+      };
+      const stmt = storeId
+        ? env.DB.prepare(
+            `SELECT ai.*, s.device, s.dir FROM archive_items ai
+               JOIN archive_stores s ON s.id = ai.store_id
+              WHERE ai.store_id = ? ORDER BY ai.bytes DESC LIMIT 1000`
+          ).bind(storeId)
+        : env.DB.prepare(
+            `SELECT ai.*, s.device, s.dir FROM archive_items ai
+               JOIN archive_stores s ON s.id = ai.store_id
+              WHERE ai.item_id = ?`
+          ).bind(itemId);
+
+      const { results } = await stmt.all<Row>();
+      return json({
+        items: (results || []).map((r) => ({
+          itemId: r.item_id,
+          storeId: r.store_id,
+          device: r.device,
+          dir: r.dir,
+          type: r.type,
+          title: r.title,
+          bytes: r.bytes,
+          createdAt: r.created_at,
+          archivedAt: r.archived_at,
+          file: r.file,
+        })),
+      });
+    }
+
+    // Ghi nhận (hoặc cập nhật) một kho. App gọi sau mỗi lần lưu về máy.
+    if (req.method === "POST" && path === "/api/archives") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureArchiveTables(env);
+
+      type Incoming = {
+        device?: string;
+        dir?: string;
+        items?: Array<{
+          id?: string; type?: string; title?: string | null; bytes?: number | null;
+          createdAt?: number | null; archivedAt?: number | null; file?: string | null;
+        }>;
+      };
+      const body = (await req.json().catch(() => null)) as Incoming | null;
+      const device = body?.device?.trim();
+      const dir = body?.dir?.trim();
+      if (!device || !dir) return json({ error: "Thiếu tên máy hoặc đường dẫn" }, 400);
+
+      const list = Array.isArray(body?.items) ? body!.items! : [];
+      const bytes = list.reduce((s, it) => s + (it.bytes ?? 0), 0);
+
+      // Kho đã có thì giữ nguyên id để các dòng archive_items cũ không mồ côi.
+      const existing = await env.DB.prepare(
+        `SELECT id FROM archive_stores WHERE device = ? AND dir = ?`
+      ).bind(device, dir).first<{ id: string }>();
+      const storeId = existing?.id ?? makeId(12);
+
+      await env.DB.prepare(
+        `INSERT INTO archive_stores (id, device, dir, items, bytes, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(device, dir) DO UPDATE SET
+           items = excluded.items, bytes = excluded.bytes, updated_at = excluded.updated_at`
+      ).bind(storeId, device, dir, list.length, bytes, Date.now()).run();
+
+      // Manifest dưới máy là nguồn sự thật: thay sạch danh sách cũ của kho này thay vì
+      // chèn thêm, để mục người dùng đã xoá khỏi thư mục không còn nằm lại trong sổ.
+      await env.DB.prepare(`DELETE FROM archive_items WHERE store_id = ?`).bind(storeId).run();
+
+      // D1 giới hạn số câu lệnh mỗi batch, chia lô cho kho vài trăm mục.
+      const rows = list.filter((it) => typeof it.id === "string" && it.id);
+      for (let i = 0; i < rows.length; i += 50) {
+        await env.DB.batch(
+          rows.slice(i, i + 50).map((it) =>
+            env.DB.prepare(
+              `INSERT INTO archive_items (item_id, store_id, type, title, bytes, created_at, archived_at, file)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(item_id, store_id) DO NOTHING`
+            ).bind(
+              it.id, storeId, it.type === "video" ? "video" : "image",
+              it.title ?? null, it.bytes ?? null, it.createdAt ?? null,
+              it.archivedAt ?? null, it.file ?? null
+            )
+          )
+        );
+      }
+
+      return json({ id: storeId, items: rows.length, bytes });
+    }
+
+    // Bỏ một kho khỏi sổ. Chỉ xoá bản ghi — file dưới máy không đụng tới.
+    if (req.method === "DELETE" && path.startsWith("/api/archives/")) {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureArchiveTables(env);
+
+      const id = path.slice("/api/archives/".length);
+      if (!id) return json({ error: "Thiếu id" }, 400);
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM archive_items WHERE store_id = ?`).bind(id),
+        env.DB.prepare(`DELETE FROM archive_stores WHERE id = ?`).bind(id),
+      ]);
+      return json({ ok: true });
     }
 
     // ---------- Dung lượng theo từng ngày (nguồn cho trang Quản lý dữ liệu) ----------
@@ -790,34 +1066,79 @@ export default {
 
         if (!file) return json({ error: "Thiếu file" }, 400);
 
-        const id = makeId();
         // Ảnh app xuất ra luôn là WebP (flattenStage) → lưu đúng mime/ext để link chia sẻ
         // hiển thị được trên web (trước đây gắn nhãn image/png cho byte WebP → ảnh vỡ).
         const ext = type === "video" ? "mp4" : "webp";
         const mime = type === "video" ? "video/mp4" : "image/webp";
-        const key = `items/${id}.${ext}`;
+        // Ảnh gốc (để sửa lại annotate) chỉ có với ảnh; video không bao giờ kèm.
+        const origFile = type === "image" ? original : null;
+        const bytes = file.size + (origFile ? origFile.size : 0);
 
-        await env.BUCKET.put(key, file.stream(), { httpMetadata: { contentType: mime } });
+        // Khôi phục từ kho dưới máy xin lại ĐÚNG id cũ để link chia sẻ cũ sống lại.
+        // Chỉ nhận id đúng khuôn makeId(): id ghép thẳng vào key R2 nên ký tự lạ (dấu /,
+        // "..") có thể trỏ ra ngoài thư mục items/ và giẫm lên file khác.
+        const wantedRaw = form.get("id")?.toString() ?? "";
+        const wanted = /^[0-9A-Za-z]{10}$/.test(wantedRaw) ? wantedRaw : null;
 
-        // Lưu thêm ảnh gốc (để sửa lại annotate) nếu có — cũng là WebP.
-        let origKey: string | null = null;
-        let bytes = file.size;
-        if (type === "image" && original) {
-          origKey = `items/${id}_orig.webp`;
-          await env.BUCKET.put(origKey, original.stream(), {
-            httpMetadata: { contentType: "image/webp" },
-          });
-          bytes += original.size;
+        // Giữ chỗ id trong D1 TRƯỚC khi ghi R2 — đây là chốt chống trùng. id đã có chủ thì
+        // ON CONFLICT DO NOTHING không đổi dòng nào (changes = 0) và ta chưa hề đụng vào
+        // file của họ. Làm ngược lại (ghi R2 trước) sẽ ghi đè im lặng nội dung mục cũ:
+        // link cũ vẫn mở được nhưng ra nội dung khác, hỏng dữ liệu mà không ai hay.
+        const reserve = (candidate: string) =>
+          env.DB.prepare(
+            `INSERT INTO items (id, type, r2_key, r2_key_orig, mime, annotations, title, created_at, bytes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING`
+          )
+            .bind(
+              candidate,
+              type,
+              `items/${candidate}.${ext}`,
+              origFile ? `items/${candidate}_orig.webp` : null,
+              mime,
+              annotations,
+              title,
+              createdAt,
+              bytes
+            )
+            .run();
+
+        let id = "";
+        let keptId = false;
+        if (wanted && (await reserve(wanted)).meta.changes === 1) {
+          id = wanted;
+          keptId = true;
+        } else {
+          // Không xin id cũ, hoặc id cũ đã có chủ → bốc id mới. Vài lượt là quá đủ:
+          // 62^10 tổ hợp nên trùng ngẫu nhiên gần như không xảy ra.
+          for (let i = 0; i < 5 && !id; i++) {
+            const candidate = makeId();
+            if ((await reserve(candidate)).meta.changes === 1) id = candidate;
+          }
+          if (!id) return json({ error: "Không cấp được id, thử lại" }, 503);
         }
 
-        await env.DB.prepare(
-          `INSERT INTO items (id, type, r2_key, r2_key_orig, mime, annotations, title, created_at, bytes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-          .bind(id, type, key, origKey, mime, annotations, title, createdAt, bytes)
-          .run();
+        const key = `items/${id}.${ext}`;
+        const origKey = origFile ? `items/${id}_orig.webp` : null;
+        meter.rowsWritten += 1; // dòng vừa giữ chỗ ở trên
+        try {
+          await env.BUCKET.put(key, file.stream(), { httpMetadata: { contentType: mime } });
+          meter.classA += 1;
+          if (origFile && origKey) {
+            await env.BUCKET.put(origKey, origFile.stream(), {
+              httpMetadata: { contentType: "image/webp" },
+            });
+            meter.classA += 1;
+          }
+        } catch (err) {
+          // Ghi file hỏng giữa chừng: trả lại id vừa giữ chỗ và dọn phần đã kịp ghi, kẻo
+          // để lại dòng trỏ vào file không tồn tại + file rác chiếm dung lượng.
+          await env.DB.prepare(`DELETE FROM items WHERE id = ?`).bind(id).run();
+          await env.BUCKET.delete(origKey ? [key, origKey] : [key]).catch(() => {});
+          throw err;
+        }
 
-        return json({ id, url: `${url.origin}/v/${id}` });
+        return json({ id, url: `${url.origin}/v/${id}`, keptId });
       } catch (err) {
         return json({ error: "Upload thất bại", detail: String(err) }, 500);
       }
@@ -918,7 +1239,7 @@ export default {
       // File ảnh trong hệ thống LUÔN là WebP → ép image/webp kể cả item cũ lưu nhãn
       // image/png (sửa lỗi link ảnh vỡ trên web). Video giữ nguyên mime đã lưu.
       const serveMime = row.mime.startsWith("image/") ? "image/webp" : row.mime;
-      return serveR2(env, row.r2_key, serveMime, req);
+      return serveR2(env, row.r2_key, serveMime, req, meter);
     }
 
     // ---------- Công khai: ảnh gốc (để sửa) ----------
@@ -1008,5 +1329,19 @@ ${heading}${media}
     }
 
     return new Response("Not found", { status: 404, headers: CORS });
+  },
+};
+
+export default {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    // Đếm ngay từ đầu, kể cả OPTIONS lẫn 404 — Cloudflare cũng tính những lượt đó.
+    const meter: Meter = { requests: 1, classA: 0, classB: 0, rowsWritten: 0 };
+    try {
+      return await routes.handle(req, env, meter);
+    } finally {
+      // waitUntil: ghi sổ SAU khi response đã đi, người dùng không phải chờ thêm. Ghi hỏng
+      // thì nuốt lỗi — sổ đếm sai vài lượt còn hơn làm hỏng một request thật.
+      ctx.waitUntil(flushMeter(env, meter).catch(() => {}));
+    }
   },
 };
