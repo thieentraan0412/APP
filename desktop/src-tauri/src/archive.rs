@@ -91,3 +91,46 @@ pub fn archive_read_file(path: String) -> Result<tauri::ipc::Response, String> {
 pub fn archive_file_size(path: String) -> Option<u64> {
     std::fs::metadata(&path).ok().map(|m| m.len())
 }
+
+// Thư mục kho còn sống không, và đang chứa bao nhiêu mục theo manifest. Dùng để hiện danh
+// sách kho đã lưu mà không phải quét kích thước từng file (kho vài trăm mục sẽ rất chậm).
+#[tauri::command]
+pub fn archive_dir_state(path: String) -> (bool, u64) {
+    let dir = Path::new(&path);
+    if !dir.is_dir() {
+        return (false, 0);
+    }
+    let count = std::fs::read_to_string(dir.join("captureshare-archive.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v.get("items").and_then(|i| i.as_array()).map(|a| a.len() as u64))
+        .unwrap_or(0);
+    (true, count)
+}
+
+// Tên máy, để sổ kho trên cloud phân biệt được kho nào của máy nào. COMPUTERNAME luôn có
+// trên Windows; thiếu thì trả "Máy không rõ tên" chứ đừng để trống làm gộp nhầm hai máy.
+#[tauri::command]
+pub fn device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Máy không rõ tên".to_string())
+}
+
+// Mở thư mục kho trong File Explorer — để người dùng nhìn tận mắt video/ảnh nằm ở đâu.
+#[tauri::command]
+pub fn archive_open_dir(path: String) -> Result<(), String> {
+    let dir = Path::new(&path);
+    if !dir.is_dir() {
+        return Err("Thư mục không còn tồn tại".into());
+    }
+    // explorer.exe trả mã thoát khác 0 kể cả khi mở thành công, nên spawn rồi thôi,
+    // không chờ và không xét mã thoát.
+    std::process::Command::new("explorer")
+        .arg(dir)
+        .spawn()
+        .map_err(|e| format!("Không mở được thư mục: {e}"))?;
+    Ok(())
+}

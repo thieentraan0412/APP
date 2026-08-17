@@ -1,5 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getStorageItems, type StorageItem, type StorageOverview } from "../lib/api";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  getStorageItems,
+  getArchivedItems,
+  lookupId,
+  parseItemId,
+  type IdLookup,
+  type StorageItem,
+  type StorageItemsPage,
+  type StorageOverview,
+  type ArchiveStore,
+  type ArchivedItem,
+} from "../lib/api";
+import { folderName } from "../lib/archive";
 
 interface Props {
   overview: StorageOverview | null;
@@ -8,22 +21,34 @@ interface Props {
   /** Kết quả quét R2 gần nhất (file rác) — null nếu chưa đồng bộ lần nào trong phiên này */
   orphan: { count: number; bytes: number } | null;
   syncing: boolean;
+  /** Quét R2 đối chiếu dung lượng + tìm file rác, rồi đọc lại thống kê. Một nút làm cả hai. */
   onRefresh: () => void;
-  onSync: () => void;
   onPurgeOrphans: () => void;
   /** Trả về true nếu người dùng xác nhận và đã xoá xong */
   onPurgeRange: (from: number, to: number, label: string, items: number, bytes: number) => Promise<boolean>;
   onPurgeIds: (ids: string[], bytes: number) => Promise<boolean>;
   /** Tải các mục đã chọn về máy rồi mới xoá trên cloud. true = đã xoá xong */
   onArchiveItems: (items: StorageItem[]) => Promise<boolean>;
-  /** Đọc một thư mục kho dưới máy và tải các mục trong đó lên lại */
-  onRestore: () => void;
+  /** Đọc một thư mục kho dưới máy và tải các mục trong đó lên lại.
+   *  Truyền `dir` để khôi phục thẳng từ thư mục đã nhớ, bỏ qua hộp thoại chọn thư mục. */
+  onRestore: (dir?: string) => void;
+  /** Sổ kho dùng chung mọi máy (lấy từ cloud), mới cập nhật nhất xếp trước */
+  archiveStores: ArchiveStore[];
+  /** Tên máy hiện tại — để phân biệt kho ngay tại đây với kho ở máy khác */
+  device: string;
+  /** Thư mục còn tồn tại không + số mục thật, CHỈ dò được cho kho trên máy này */
+  dirStates: Record<string, { exists: boolean; items: number }>;
+  onOpenArchiveDir: (dir: string) => void;
+  onForgetArchiveStore: (id: string) => void;
+  onRefreshArchives: () => void;
   /** Tiến độ tải về / khôi phục đang chạy (null = rảnh) */
   progress: { title: string; done: number; total: number; label: string } | null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MONTHS = ["Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6", "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12"];
+/** Trần một lượt xử lý cả mốc thời gian — đúng bằng trần API `/api/storage/items`. */
+const PERIOD_LIMIT = 1000;
+const MONTHS =["Tháng 1", "Tháng 2", "Tháng 3", "Tháng 4", "Tháng 5", "Tháng 6", "Tháng 7", "Tháng 8", "Tháng 9", "Tháng 10", "Tháng 11", "Tháng 12"];
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
@@ -72,9 +97,11 @@ function fmtDateTime(ms: number): string {
 const S = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none" as const, stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
 const IcoTrash = () => <svg {...S}><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>;
 const IcoRefresh = () => <svg {...S}><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>;
-const IcoSync = () => <svg {...S}><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M21 3v5h-5" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" /><path d="M3 21v-5h5" /></svg>;
 const IcoSave = () => <svg {...S}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>;
 const IcoRestore = () => <svg {...S}><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>;
+const IcoFolder = () => <svg {...S}><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>;
+const IcoClose = () => <svg {...S}><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>;
+const IcoSearch = () => <svg {...S}><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>;
 const IcoChevron = ({ open }: { open: boolean }) => (
   <svg {...S} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s" }}><polyline points="9 18 15 12 9 6" /></svg>
 );
@@ -230,7 +257,7 @@ function CutoffDate({ value, onChange }: { value: string; onChange: (iso: string
 }
 
 export function DataScreen(props: Props) {
-  const { overview, loading, error, orphan, syncing, onRefresh, onSync, onPurgeOrphans, onPurgeRange, onPurgeIds, onArchiveItems, onRestore, progress } = props;
+  const { overview, loading, error, orphan, syncing, onRefresh, onPurgeOrphans, onPurgeRange, onPurgeIds, onArchiveItems, onRestore, progress, archiveStores, device, dirStates, onOpenArchiveDir, onForgetArchiveStore, onRefreshArchives } = props;
 
   const [groupBy, setGroupBy] = useState<GroupBy>("month");
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -241,6 +268,57 @@ export function DataScreen(props: Props) {
   const [itemsError, setItemsError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  // Thông báo cho thao tác chạy trên cả mốc thời gian (không mở danh sách ra) — chỗ này
+  // không có sẵn ô báo lỗi nào như trong danh sách đang mở.
+  const [bulkNote, setBulkNote] = useState<string | null>(null);
+  // Kho đang mở xem chi tiết + danh sách mục của nó (lấy từ sổ trên cloud, không đọc đĩa
+  // — nhờ vậy xem được cả kho nằm ở máy khác).
+  // Tra cứu theo id / link dán vào
+  const [query, setQuery] = useState("");
+  const [lookup, setLookup] = useState<IdLookup | null>(null);
+  const [lookupErr, setLookupErr] = useState<string | null>(null);
+  const [looking, setLooking] = useState(false);
+
+  async function runLookup() {
+    const id = parseItemId(query);
+    setLookup(null);
+    if (!id) {
+      setLookupErr("Id phải đúng 10 ký tự chữ/số. Dán cả link chia sẻ cũng được.");
+      return;
+    }
+    setLookupErr(null);
+    setLooking(true);
+    try {
+      setLookup(await lookupId(id));
+    } catch (err) {
+      setLookupErr(String(err));
+    } finally {
+      setLooking(false);
+    }
+  }
+
+  const [openStore, setOpenStore] = useState<string | null>(null);
+  const [storeItems, setStoreItems] = useState<ArchivedItem[]>([]);
+  const [storeLoading, setStoreLoading] = useState(false);
+
+  async function toggleStore(s: ArchiveStore) {
+    if (openStore === s.id) {
+      setOpenStore(null);
+      setStoreItems([]);
+      return;
+    }
+    setOpenStore(s.id);
+    setStoreItems([]);
+    setStoreLoading(true);
+    try {
+      setStoreItems(await getArchivedItems({ store: s.id }));
+    } catch (err) {
+      setBulkNote("Không xem được kho: " + String(err));
+      setOpenStore(null);
+    } finally {
+      setStoreLoading(false);
+    }
+  }
 
   // Mốc "xoá dữ liệu cũ hơn": mặc định 90 ngày trước
   const [cutoff, setCutoff] = useState(() => toIso(new Date(Date.now() - 90 * DAY_MS)));
@@ -302,11 +380,39 @@ export function DataScreen(props: Props) {
   }
 
   async function deletePeriod(p: Period) {
+    setBulkNote(null);
     const ok = await run(() => onPurgeRange(p.from, p.to, p.label, p.items, p.bytes));
     if (ok && openKey === p.key) {
       setOpenKey(null);
       setItems([]);
     }
+  }
+
+  // Lưu cả mốc về máy rồi xoá trên cloud — tự lấy danh sách nên không phải mở ra tick từng
+  // mục. API chỉ trả tối đa PERIOD_LIMIT mục một lượt: vượt trần thì nói thẳng còn bao nhiêu
+  // chứ không lặng lẽ bỏ sót phần đuôi.
+  async function archivePeriod(p: Period) {
+    setBulkNote(null);
+    await run(async () => {
+      let page: StorageItemsPage;
+      try {
+        page = await getStorageItems(p.from, p.to, PERIOD_LIMIT);
+      } catch (err) {
+        setBulkNote(`Không lấy được danh sách ${p.label}: ${String(err)}`);
+        return false;
+      }
+      if (page.items.length === 0) {
+        setBulkNote(`${p.label} không còn mục nào để lưu.`);
+        return false;
+      }
+      if (page.truncated) {
+        setBulkNote(
+          `${p.label} có ${formatNumber(page.total)} mục — lượt này xử lý ${formatNumber(page.items.length)} mục nặng nhất. ` +
+            `Xong rồi bấm lại nút này để làm tiếp phần còn lại.`
+        );
+      }
+      return onArchiveItems(page.items);
+    }, openKey === p.key ? p : undefined);
   }
 
   async function deleteOld() {
@@ -350,14 +456,16 @@ export function DataScreen(props: Props) {
           </p>
         </div>
         <div className="data-header-actions">
-          <button onClick={onRestore} disabled={loading || busy || !!progress} title="Chọn thư mục kho đã lưu dưới máy và tải các mục trong đó lên lại">
+          <button onClick={() => onRestore()} disabled={loading || busy || !!progress} title="Chọn thư mục kho đã lưu dưới máy và tải các mục trong đó lên lại">
             <IcoRestore />Khôi phục từ máy
           </button>
-          <button onClick={onSync} disabled={syncing || loading || locked} title="Quét R2 để cập nhật dung lượng thật và tìm file rác">
-            <span className={syncing ? "data-spin" : ""}><IcoSync /></span>{syncing ? "Đang quét…" : "Đồng bộ dung lượng"}
-          </button>
-          <button onClick={onRefresh} disabled={loading || locked}>
-            <span className={loading ? "data-spin" : ""}><IcoRefresh /></span>{loading ? "Đang tải…" : "Làm mới"}
+          <button
+            onClick={onRefresh}
+            disabled={syncing || loading || locked}
+            title="Quét R2 đối chiếu dung lượng thật, tìm file rác, rồi đọc lại thống kê"
+          >
+            <span className={syncing || loading ? "data-spin" : ""}><IcoRefresh /></span>
+            {syncing ? "Đang quét R2…" : loading ? "Đang tải…" : "Làm mới"}
           </button>
         </div>
       </header>
@@ -365,18 +473,8 @@ export function DataScreen(props: Props) {
       <main className="data-scroll">
         {error && <p className="data-error">Lỗi: {error}</p>}
 
-        {progress && (
-          <div className="data-progress">
-            <div className="data-progress-head">
-              <b>{progress.title}</b>
-              <span>{formatNumber(progress.done)}/{formatNumber(progress.total)}</span>
-            </div>
-            <div className="data-progress-bar">
-              <div style={{ width: `${progress.total > 0 ? (progress.done / progress.total) * 100 : 0}%` }} />
-            </div>
-            {progress.label && <small>{progress.label}</small>}
-          </div>
-        )}
+        {/* Tiến độ đã chuyển thành modal đè toàn màn hình (ProgressModal) — để trong vùng
+            cuộn thì cuộn xuống là mất hút, không biết còn bao lâu nữa mới xong. */}
 
         {!overview && !error && (
           <div className="data-empty">{loading ? "Đang tính dung lượng…" : "Chưa tải được dữ liệu."}</div>
@@ -410,8 +508,8 @@ export function DataScreen(props: Props) {
             {overview.total.unsized > 0 && (
               <div className="data-notice">
                 <b>{formatNumber(overview.total.unsized)} mục chưa biết dung lượng</b>
-                <span>Đây là dữ liệu tạo trước khi app ghi lại kích thước. Bấm “Đồng bộ dung lượng” để quét R2 và điền số liệu.</span>
-                <button className="data-btn" onClick={onSync} disabled={syncing || locked}>{syncing ? "Đang quét…" : "Đồng bộ ngay"}</button>
+                <span>Đây là dữ liệu tạo trước khi app ghi lại kích thước. Bấm “Làm mới” để quét R2 và điền số liệu.</span>
+                <button className="data-btn" onClick={onRefresh} disabled={syncing || locked}>{syncing ? "Đang quét…" : "Làm mới ngay"}</button>
               </div>
             )}
 
@@ -460,6 +558,220 @@ export function DataScreen(props: Props) {
 
             <section className="data-card">
               <div className="data-card-head">
+                <h2>Tra theo ID</h2>
+                <span className="data-hint">Còn sống thì hiện link, đã xoá thì chỉ ra máy và thư mục đang giữ</span>
+              </div>
+
+              <div className="data-find">
+                <input
+                  className="data-find-input"
+                  placeholder="Dán id (vd Br5EIm7oVW) hoặc cả link chia sẻ…"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") runLookup(); }}
+                  spellCheck={false}
+                />
+                <button className="data-btn data-btn--save" onClick={runLookup} disabled={looking || !query.trim()}>
+                  <IcoSearch />{looking ? "Đang tra…" : "Tra"}
+                </button>
+                {(lookup || lookupErr) && (
+                  <button
+                    className="data-ico"
+                    title="Xoá kết quả"
+                    onClick={() => { setQuery(""); setLookup(null); setLookupErr(null); }}
+                  >
+                    <IcoClose />
+                  </button>
+                )}
+              </div>
+
+              {lookupErr && <p className="data-error">{lookupErr}</p>}
+
+              {lookup && (
+                <div className="data-found">
+                  <div className={`data-found-head data-found-head--${lookup.live ? "live" : "gone"}`}>
+                    <span className="data-found-dot" />
+                    <b>
+                      {lookup.live
+                        ? "Còn trên cloud — link vẫn dùng được"
+                        : "Đã xoá khỏi cloud — link cũ đang chết"}
+                    </b>
+                    <code>{lookup.id}</code>
+                  </div>
+
+                  {lookup.live && (
+                    <div className="data-found-row">
+                      <span className={`data-badge data-badge--${lookup.live.type}`} style={{ cursor: "default" }}>
+                        {lookup.live.type === "image" ? "Ảnh" : "Video"}
+                      </span>
+                      <span className="data-item-title">
+                        {lookup.live.title || <i>(không tiêu đề)</i>}
+                      </span>
+                      <span className="data-item-time">{fmtDateTime(lookup.live.createdAt)}</span>
+                      <button
+                        className="data-btn"
+                        title={lookup.live.url}
+                        onClick={() => openUrl(lookup.live!.url).catch(() => {})}
+                      >
+                        Mở link
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Bản sao dưới máy: với mục đã xoá thì đây là đường cứu duy nhất, nên
+                      phải chỉ rõ máy nào + thư mục nào + tên file nào. */}
+                  {lookup.copies.length > 0 ? (
+                    <div className="data-found-copies">
+                      <div className="data-found-sub">
+                        Có bản sao ở {lookup.copies.length} kho dưới máy:
+                      </div>
+                      {lookup.copies.map((c) => (
+                        <div className="data-found-copy" key={c.storeId}>
+                          <span className={`data-chip${c.device === device ? " data-chip--here" : ""}`}>
+                            {c.device === device ? "máy này" : c.device}
+                          </span>
+                          <span className="data-found-path" title={c.dir}>{c.dir}</span>
+                          <span className="data-found-file" title={c.file ?? ""}>{c.file}</span>
+                          {c.device === device && (
+                            <button
+                              className="data-ico"
+                              title="Mở thư mục trong File Explorer"
+                              onClick={() => onOpenArchiveDir(c.dir)}
+                            >
+                              <IcoFolder />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    !lookup.live && (
+                      <p className="data-note">
+                        Không có bản sao nào trong sổ kho — mục này đã mất hẳn, không khôi phục được.
+                      </p>
+                    )
+                  )}
+                </div>
+              )}
+            </section>
+
+            <section className="data-card">
+              <div className="data-card-head">
+                <h2>Kho đã lưu trên máy</h2>
+                <span className="data-hint">
+                  Sổ dùng chung mọi máy — biết nội dung đã xoá đang nằm ở máy nào, thư mục nào
+                </span>
+                <button className="data-ico" title="Tải lại sổ kho" onClick={onRefreshArchives}>
+                  <IcoRefresh />
+                </button>
+              </div>
+
+              {archiveStores.length === 0 ? (
+                <div className="data-empty">
+                  Sổ kho chưa có gì. Lưu bằng nút <b>⬇</b> ở mỗi mốc thời gian bên dưới, hoặc bấm
+                  <b>“Khôi phục từ máy”</b> chọn thư mục kho cũ một lần — kho sẽ được ghi vào sổ
+                  và hiện ở đây trên <b>mọi máy</b> dùng chung tài khoản.
+                </div>
+              ) : (
+                <div className="data-dirs">
+                  {archiveStores.map((s) => {
+                    const here = s.device === device;
+                    const st = dirStates[s.dir];
+                    // Chỉ dò được thư mục trên chính máy này; kho máy khác đành tin sổ.
+                    const count = here && st?.exists ? st.items : s.items;
+                    const gone = here && st != null && !st.exists;
+                    const open = openStore === s.id;
+                    return (
+                      <div className={`data-dir${gone ? " data-dir--gone" : ""}`} key={s.id}>
+                        <div className="data-dir-row">
+                          <div className="data-dir-info">
+                            <b title={s.dir}>
+                              {folderName(s.dir)}
+                              <span className={`data-chip${here ? " data-chip--here" : ""}`}>
+                                {here ? "máy này" : s.device}
+                              </span>
+                            </b>
+                            <small title={s.dir}>{s.dir}</small>
+                          </div>
+                          <div className="data-dir-meta">
+                            {gone ? (
+                              <span className="data-dir-warn">Không tìm thấy thư mục</span>
+                            ) : (
+                              <>
+                                {formatNumber(count)} mục · {formatBytes(s.bytes)}
+                                <small>cập nhật {fmtDateTime(s.updatedAt)}</small>
+                              </>
+                            )}
+                          </div>
+                          <button
+                            className="data-btn"
+                            onClick={() => toggleStore(s)}
+                            title="Xem những nội dung đang nằm trong kho này"
+                          >
+                            <IcoChevron open={open} />{open ? "Đóng" : "Xem"}
+                          </button>
+                          <button
+                            className="data-btn data-btn--save"
+                            disabled={locked || !here || gone || count === 0}
+                            title={
+                              here
+                                ? "Tải mọi mục trong thư mục này lên lại, xin đúng link chia sẻ cũ"
+                                : `Kho này nằm ở máy “${s.device}” — mở app trên máy đó để khôi phục`
+                            }
+                            onClick={() => onRestore(s.dir)}
+                          >
+                            <IcoRestore />Khôi phục
+                          </button>
+                          <button
+                            className="data-ico"
+                            disabled={!here || gone}
+                            title={here ? "Mở thư mục trong File Explorer" : "Chỉ mở được trên máy đang giữ kho"}
+                            onClick={() => onOpenArchiveDir(s.dir)}
+                          >
+                            <IcoFolder />
+                          </button>
+                          <button
+                            className="data-ico"
+                            title="Bỏ khỏi sổ (không xoá file dưới máy)"
+                            onClick={() => onForgetArchiveStore(s.id)}
+                          >
+                            <IcoClose />
+                          </button>
+                        </div>
+
+                        {open && (
+                          <div className="data-dir-body">
+                            {storeLoading && <div className="data-empty">Đang tải…</div>}
+                            {!storeLoading && storeItems.length === 0 && (
+                              <div className="data-empty">Sổ chưa ghi mục nào cho kho này.</div>
+                            )}
+                            {!storeLoading && storeItems.map((it) => (
+                              <div className="data-store-item" key={it.itemId}>
+                                <span className={`data-badge data-badge--${it.type}`} style={{ cursor: "default" }}>
+                                  {it.type === "image" ? "Ảnh" : "Video"}
+                                </span>
+                                <span className="data-item-title" title={it.file ?? ""}>
+                                  {it.title || <i>(không tiêu đề)</i>}
+                                </span>
+                                <span className="data-item-time">
+                                  {it.createdAt ? fmtDateTime(it.createdAt) : ""}
+                                </span>
+                                <span className="data-item-size">
+                                  {it.bytes == null ? "—" : formatBytes(it.bytes)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            <section className="data-card">
+              <div className="data-card-head">
                 <h2>Dữ liệu theo thời gian</h2>
                 <div className="data-segment">
                   {([["month", "Theo tháng"], ["week", "Theo tuần"], ["day", "Theo ngày"]] as const).map(([g, label]) => (
@@ -473,6 +785,8 @@ export function DataScreen(props: Props) {
                   ))}
                 </div>
               </div>
+
+              {bulkNote && <p className="data-note">{bulkNote}</p>}
 
               {periods.length === 0 && <div className="data-empty">Chưa có nội dung nào.</div>}
 
@@ -498,14 +812,24 @@ export function DataScreen(props: Props) {
                           {formatBytes(p.bytes)}
                           {p.unsized > 0 && <small>{formatNumber(p.unsized)} mục chưa rõ</small>}
                         </div>
-                        <button
-                          className="data-ico data-ico--danger"
-                          title={`Xoá toàn bộ ${p.label}`}
-                          disabled={locked}
-                          onClick={(e) => { e.stopPropagation(); deletePeriod(p); }}
-                        >
-                          <IcoTrash />
-                        </button>
+                        <div className="data-period-acts">
+                          <button
+                            className="data-ico data-ico--save"
+                            title={`Lưu toàn bộ ${p.label} về máy rồi xoá trên cloud — khôi phục lại được`}
+                            disabled={locked}
+                            onClick={(e) => { e.stopPropagation(); archivePeriod(p); }}
+                          >
+                            <IcoSave />
+                          </button>
+                          <button
+                            className="data-ico data-ico--danger"
+                            title={`Xoá hẳn toàn bộ ${p.label} — không thể hoàn tác`}
+                            disabled={locked}
+                            onClick={(e) => { e.stopPropagation(); deletePeriod(p); }}
+                          >
+                            <IcoTrash />
+                          </button>
+                        </div>
                       </div>
 
                       {open && (
@@ -524,7 +848,7 @@ export function DataScreen(props: Props) {
                                   Chọn tất cả ({items.length})
                                 </label>
                                 <span className="data-hint">
-                                  Nặng nhất xếp trước
+                                  Nặng nhất xếp trước · bấm nhãn Ảnh/Video để mở link
                                   {itemsTruncated && ` · hiển thị ${items.length}/${formatNumber(itemsTotal)} mục`}
                                 </span>
                                 <div className="data-spacer" />
@@ -559,7 +883,20 @@ export function DataScreen(props: Props) {
                                         return next;
                                       })}
                                     />
-                                    <span className={`data-badge data-badge--${it.type}`}>{it.type === "image" ? "Ảnh" : "Video"}</span>
+                                    <button
+                                      type="button"
+                                      className={`data-badge data-badge--${it.type}`}
+                                      title={`Mở link chia sẻ — ${it.url}`}
+                                      onClick={(e) => {
+                                        // Nhãn này nằm trong <label> bọc ô tick: không chặn thì
+                                        // bấm xem link lại hoá ra chọn/bỏ chọn mục.
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        openUrl(it.url).catch(() => {});
+                                      }}
+                                    >
+                                      {it.type === "image" ? "Ảnh" : "Video"}
+                                    </button>
                                     <span className="data-item-title">{it.title || <i>(không tiêu đề)</i>}</span>
                                     <span className="data-item-time">{fmtDateTime(it.createdAt)}</span>
                                     <span className="data-item-size">{it.bytes == null ? "—" : formatBytes(it.bytes)}</span>
@@ -580,7 +917,7 @@ export function DataScreen(props: Props) {
               Dung lượng tính theo số byte thật trên Cloudflare R2 (ảnh đã gộp + ảnh gốc dùng để sửa lại annotate).
               “Xoá hẳn” là xoá vĩnh viễn cả file lẫn link chia sẻ, không thể hoàn tác.
               “Lưu về máy &amp; xoá” tải nội dung xuống thư mục bạn chọn trước, chỉ xoá trên cloud những mục đã lưu xong,
-              và khôi phục lại được bằng nút “Khôi phục từ máy” — nhưng mục khôi phục mang link chia sẻ mới, link cũ đã hỏng thì không sống lại.
+              và khôi phục lại được bằng nút “Khôi phục từ máy” — mục khôi phục xin lại đúng link chia sẻ cũ, trừ khi id đó đã bị nội dung khác dùng mất.
             </p>
           </>
         )}
@@ -625,10 +962,12 @@ function DataStyles() {
     .data-btn{border:1px solid #dfe2e7;background:#fff;border-radius:9px;padding:8px 13px;font-size:12px;font-weight:650;color:#374151;cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
     .data-btn:hover:not(:disabled){background:#f8fafc}
     .data-btn:disabled{opacity:.5;cursor:default}
+    /* Phải nhắc lại border-color ở :hover — button:hover toàn cục (App.css) có độ ưu tiên
+       cao hơn selector một lớp class, không nhắc thì viền đỏ/xanh hoá xám lúc rê chuột. */
     .data-btn--danger{color:#b91c1c;border-color:#fca5a5;background:#fff}
-    .data-btn--danger:hover:not(:disabled){background:#fef2f2}
+    .data-btn--danger:hover:not(:disabled){background:#fef2f2;border-color:#fca5a5}
     .data-btn--save{color:#1d4ed8;border-color:#bfdbfe;background:#fff}
-    .data-btn--save:hover:not(:disabled){background:#eff6ff}
+    .data-btn--save:hover:not(:disabled){background:#eff6ff;border-color:#bfdbfe}
 
     .data-progress{background:#fff;border:1px solid #dbeafe;border-radius:12px;padding:12px 15px;margin-bottom:11px;box-shadow:0 1px 3px rgba(15,23,42,.04)}
     .data-progress-head{display:flex;align-items:center;justify-content:space-between;font-size:12.5px;color:#1e40af}
@@ -647,10 +986,44 @@ function DataStyles() {
     .data-cleanup-result{margin-top:13px;padding-top:13px;border-top:1px solid #f0f1f3;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12.5px;color:#4b5563}
     .data-cleanup-result b{color:#111827}
 
+    .data-find{display:flex;align-items:center;gap:8px;margin-top:12px}
+    .data-find-input{flex:1;min-width:0;border:1px solid #dfe2e7;border-radius:9px;padding:9px 12px;font-size:12.5px;font-family:inherit;color:#1f2937}
+    .data-find-input:focus{outline:none;border-color:#a5b4fc;box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+    .data-found{margin-top:12px;border:1px solid #eef0f3;border-radius:10px;overflow:hidden}
+    .data-found-head{display:flex;align-items:center;gap:9px;padding:10px 12px;font-size:12.5px}
+    .data-found-head code{margin-left:auto;font-size:11.5px;color:#6b7280;background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:2px 7px}
+    .data-found-dot{width:9px;height:9px;border-radius:99px;flex:none}
+    .data-found-head--live{background:#f0fdf4;color:#15803d}
+    .data-found-head--live .data-found-dot{background:#22c55e}
+    .data-found-head--gone{background:#fff7ed;color:#c2410c}
+    .data-found-head--gone .data-found-dot{background:#f97316}
+    .data-found-row{display:grid;grid-template-columns:48px 1fr 140px auto;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid #eef0f3;font-size:11.5px}
+    .data-found-copies{border-top:1px solid #eef0f3;padding:9px 12px 11px}
+    .data-found-sub{font-size:11px;color:#6b7280;font-weight:600;margin-bottom:7px}
+    .data-found-copy{display:grid;grid-template-columns:auto minmax(0,1fr) minmax(0,200px) 28px;align-items:center;gap:10px;padding:5px 0;font-size:11.5px}
+    .data-found-path{color:#374151;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+    .data-found-file{color:#9aa1ac;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+    .data-dirs{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+    .data-dir{border:1px solid #eef0f3;border-radius:10px;background:#fafbfc;overflow:hidden}
+    .data-dir-row{display:grid;grid-template-columns:minmax(0,1fr) 175px auto auto 28px 28px;align-items:center;gap:10px;padding:10px 12px}
+    .data-dir--gone{background:#fff7ed;border-color:#fed7aa}
+    .data-dir-body{border-top:1px solid #eef0f3;background:#fff;padding:4px 12px 8px}
+    .data-store-item{display:grid;grid-template-columns:48px 1fr 140px 76px;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:11.5px}
+    .data-store-item:last-child{border-bottom:none}
+    .data-chip{margin-left:7px;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:99px;background:#eef0f3;color:#6b7280;vertical-align:middle}
+    .data-chip--here{background:#dcfce7;color:#15803d}
+    .data-dir-info{min-width:0}
+    .data-dir-info b{font-size:12.5px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .data-dir-info small{display:block;font-size:10px;color:#a1a7b1;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left}
+    .data-dir-meta{font-size:11.5px;color:#6b7280;text-align:right;font-weight:600}
+    .data-dir-meta small{display:block;font-size:10px;color:#a1a7b1;font-weight:500;margin-top:2px}
+    .data-dir-warn{color:#c2410c;font-weight:700;font-size:11px}
+
     .data-periods{margin-top:6px}
     .data-period{border-bottom:1px solid #f0f1f3}
     .data-period:last-child{border-bottom:none}
-    .data-period-row{display:grid;grid-template-columns:18px minmax(110px,1.1fr) 120px minmax(80px,1.4fr) 110px 30px;align-items:center;gap:10px;padding:11px 2px;cursor:pointer}
+    .data-period-row{display:grid;grid-template-columns:18px minmax(110px,1.1fr) 120px minmax(80px,1.4fr) 110px 62px;align-items:center;gap:10px;padding:11px 2px;cursor:pointer}
     .data-period-row:hover{background:#fafbfc}
     .data-period-chev{color:#b6bcc6;display:flex}
     .data-period-name b{font-size:13px;display:block}
@@ -660,10 +1033,17 @@ function DataStyles() {
     .data-period-bar>div{height:100%;border-radius:99px;background:linear-gradient(90deg,#6366f1,#8b5cf6);min-width:2px;transition:width .35s ease}
     .data-period-size{font-size:12.5px;font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
     .data-period-size small{font-weight:500;color:#d97706}
-    .data-ico{border:1px solid transparent;background:none;border-radius:8px;width:28px;height:28px;display:grid;place-items:center;cursor:pointer;color:#9aa1ac}
-    .data-ico:hover:not(:disabled){background:#f1f3f6;color:#4b5563}
+    .data-period-acts{display:flex;gap:3px;justify-content:flex-end}
+    /* padding:0 là bắt buộc: App.css đặt padding 0.5rem 0.9rem cho MỌI <button>, cộng với
+       box-sizing:border-box thì vùng nội dung của ô 28px co về 0 và icon bị đẩy lệch khỏi
+       tâm khung hover. border-color cũng phải khai báo, không thì luật button:hover toàn
+       cục nhuộm xám viền lẽ ra phải trong suốt. */
+    .data-ico{border:1px solid transparent;background:none;border-radius:8px;width:28px;height:28px;padding:0;display:grid;place-items:center;cursor:pointer;color:#9aa1ac;flex:none}
+    .data-ico:hover:not(:disabled){background:#f1f3f6;color:#4b5563;border-color:transparent}
+    .data-ico--save:hover:not(:disabled){background:#eef2ff;color:#4f46e5;border-color:#c7d2fe}
     .data-ico--danger:hover:not(:disabled){background:#fef2f2;color:#dc2626;border-color:#fecaca}
     .data-ico:disabled{opacity:.4;cursor:default}
+    .data-note{margin:10px 0 0;padding:9px 12px;border-radius:9px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:11.5px;line-height:1.5}
 
     .data-period-body{background:#fafbfc;border:1px solid #eef0f3;border-radius:10px;padding:10px 12px;margin:0 0 12px}
     .data-itembar{display:flex;align-items:center;gap:12px;padding-bottom:9px;border-bottom:1px solid #eceef1;flex-wrap:wrap}
@@ -678,7 +1058,9 @@ function DataStyles() {
     .data-item-title i{color:#a1a7b1}
     .data-item-time{color:#9aa1ac;font-size:10.5px;white-space:nowrap}
     .data-item-size{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;color:#252a34}
-    .data-badge{font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:99px;text-align:center}
+    .data-badge{font-size:9.5px;font-weight:700;padding:3px 6px;border-radius:99px;text-align:center;border:1px solid transparent;font-family:inherit;cursor:pointer;transition:box-shadow .12s,filter .12s}
+    .data-badge:hover{filter:brightness(.95);box-shadow:0 0 0 2px rgba(99,102,241,.22);border-color:transparent}
+    .data-badge:active{transform:translateY(1px)}
     .data-badge--image{background:#eef2ff;color:#4338ca}
     .data-badge--video{background:#fef3c7;color:#92400e}
 
@@ -687,7 +1069,7 @@ function DataStyles() {
     @keyframes data-spin{to{transform:rotate(360deg)}}
     @media(max-width:950px){
       .data-summary{grid-template-columns:repeat(2,minmax(0,1fr))}
-      .data-period-row{grid-template-columns:18px 1fr 100px 30px}
+      .data-period-row{grid-template-columns:18px 1fr 100px 62px}
       .data-period-bar,.data-period-count{display:none}
       .data-item{grid-template-columns:16px 48px 1fr 76px}
       .data-item-time{display:none}

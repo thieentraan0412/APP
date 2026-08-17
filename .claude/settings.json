@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo add *)"
+      "Bash(cargo add *)",
+      "Bash(npx wrangler *)"
     ]
   }
 }
