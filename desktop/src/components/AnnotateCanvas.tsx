@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Stage, Layer, Image as KImage, Rect, Text, Arrow as KArrow, Circle, Group, Transformer } from "react-konva";
 import type Konva from "konva";
 import { nanoid } from "nanoid";
-import type { Arrow, Box, Note, StepMarker, Tool } from "../types";
+import type { Arrow, Box, Highlight, Note, StepMarker, Tool } from "../types";
 
 interface Props {
   image: HTMLImageElement;
@@ -11,6 +11,12 @@ interface Props {
   color: string;
   tool: Tool;
   setTool: (t: Tool) => void;
+  /** Màu + độ dày + độ đậm của bút tô sáng đang chọn trên thanh công cụ */
+  highlightColor: string;
+  highlightThickness: number;
+  highlightOpacity: number;
+  highlights: Highlight[];
+  setHighlights: React.Dispatch<React.SetStateAction<Highlight[]>>;
   boxes: Box[];
   setBoxes: React.Dispatch<React.SetStateAction<Box[]>>;
   arrows: Arrow[];
@@ -24,9 +30,18 @@ interface Props {
   stageRef: React.RefObject<Konva.Stage | null>;
 }
 
+// Đủ mờ để đọc được chữ bên dưới, đủ đậm để nhìn là thấy ngay.
+export const HIGHLIGHT_OPACITY = 0.38;
+
+// Kéo dọc phải vượt mép dải THÊM ngần này pixel mới coi là muốn tô cả khối. Trước đây
+// ngưỡng lấy đúng bằng độ dày: đặt bút mảnh 8px thì tay rung hơn 8px là đã nhảy sang tô
+// khối, nên chỉnh độ dày như không có tác dụng — mọi vệt đều phình thành khối.
+const BLOCK_MARGIN = 26;
+
 export function AnnotateCanvas(props: Props) {
   const {
     image, width, height, color, tool, setTool,
+    highlightColor, highlightThickness, highlightOpacity, highlights, setHighlights,
     boxes, setBoxes, arrows, setArrows, steps, setSteps, notes, setNotes, selectedId, setSelectedId, stageRef,
   } = props;
 
@@ -34,6 +49,10 @@ export function AnnotateCanvas(props: Props) {
   const boxRefs = useRef<Map<string, Konva.Rect>>(new Map());
   const drawing = useRef<{ id: string; sx: number; sy: number } | null>(null);
   const arrowDrawing = useRef<{ id: string } | null>(null);
+  // Bút tô sáng: giữ mốc x đầu và tâm y của dải — kéo ngang thì dải chạy theo, còn độ dày
+  // lấy từ thanh công cụ chứ không phụ thuộc kéo dọc (đúng kiểu bút dạ quang).
+  // `block` = đã chuyển sang chế độ tô cả khối cho nét này (xem BLOCK_MARGIN).
+  const hlDrawing = useRef<{ id: string; sx: number; cy: number; block: boolean } | null>(null);
 
   // Sửa ghi chú trực tiếp tại vị trí note (thay cho prompt)
   const [editing, setEditing] = useState<{ id: string; left: number; top: number } | null>(null);
@@ -92,7 +111,7 @@ export function AnnotateCanvas(props: Props) {
     const node = selectedId ? boxRefs.current.get(selectedId) : undefined;
     tr.nodes(node ? [node] : []);
     tr.getLayer()?.batchDraw();
-  }, [selectedId, boxes]);
+  }, [selectedId, boxes, highlights]);
 
   function onMouseDown(e: Konva.KonvaEventObject<MouseEvent>) {
     const stage = e.target.getStage();
@@ -104,6 +123,19 @@ export function AnnotateCanvas(props: Props) {
       const id = nanoid(6);
       drawing.current = { id, sx: pos.x, sy: pos.y };
       setBoxes((prev) => [...prev, { id, x: pos.x, y: pos.y, w: 0, h: 0, color }]);
+      setSelectedId(null);
+      return;
+    }
+
+    if (tool === "highlight") {
+      const id = nanoid(6);
+      const h = highlightThickness;
+      hlDrawing.current = { id, sx: pos.x, cy: pos.y, block: false };
+      // Dải bám theo tâm là điểm bấm chuột → kéo dọc dòng chữ thì chữ nằm giữa vệt tô.
+      setHighlights((prev) => [
+        ...prev,
+        { id, x: pos.x, y: pos.y - h / 2, w: 0, h, color: highlightColor, opacity: highlightOpacity },
+      ]);
       setSelectedId(null);
       return;
     }
@@ -158,6 +190,23 @@ export function AnnotateCanvas(props: Props) {
       const { id } = arrowDrawing.current;
       setArrows((prev) => prev.map((a) => (a.id === id ? { ...a, x2: pos.x, y2: pos.y } : a)));
     }
+
+    if (hlDrawing.current) {
+      const { id, sx, cy } = hlDrawing.current;
+      const x = Math.min(sx, pos.x);
+      const w = Math.abs(pos.x - sx);
+      // Kéo dọc ra HẲN ngoài dải mới coi là muốn tô cả khối; rung tay trong lúc kéo ngang
+      // không đủ để kích hoạt. Và đã vào chế độ khối thì giữ nguyên tới hết nét — nếu để
+      // nó tự nhảy qua nhảy lại, dải sẽ giật liên tục quanh ngưỡng.
+      const dy = Math.abs(pos.y - cy);
+      if (!hlDrawing.current.block && dy > highlightThickness / 2 + BLOCK_MARGIN) {
+        hlDrawing.current.block = true;
+      }
+      const block = hlDrawing.current.block;
+      const h = block ? Math.max(dy, highlightThickness) : highlightThickness;
+      const y = block ? Math.min(cy, pos.y) : cy - highlightThickness / 2;
+      setHighlights((prev) => prev.map((hl) => (hl.id === id ? { ...hl, x, y, w, h } : hl)));
+    }
   }
 
   function onMouseUp() {
@@ -184,6 +233,18 @@ export function AnnotateCanvas(props: Props) {
       setSelectedId(id);
       setTool("select");
     }
+
+    if (hlDrawing.current) {
+      const id = hlDrawing.current.id;
+      hlDrawing.current = null;
+      // Bấm nhầm một cái không kéo → bỏ, tránh để lại vệt tí hon vô nghĩa.
+      setHighlights((prev) => prev.filter((h) => !(h.id === id && h.w < 5)));
+      // Giữ nguyên bút tô sáng: tô lỗi thường tô nhiều dòng liên tiếp, bắt chọn lại
+      // công cụ sau mỗi vệt thì rất phiền (khác Khung/Mũi tên vốn vẽ lẻ).
+      // Cũng KHÔNG chọn vệt vừa tô: tay cầm của khung chọn sẽ nằm đè lên vùng sắp tô
+      // tiếp, kéo phát nữa là thành co giãn vệt cũ chứ không phải vẽ vệt mới.
+      setSelectedId(null);
+    }
   }
 
   return (
@@ -199,6 +260,58 @@ export function AnnotateCanvas(props: Props) {
     >
       <Layer>
         <KImage image={image} width={width} height={height} name="bg" />
+
+        {/* Vẽ trước mọi thứ khác: dải mờ nằm DƯỚI khung/mũi tên/chữ, nếu không nó phủ
+            một lớp màu lên chúng và làm chú thích bị xỉn màu. */}
+        {highlights.map((h) => (
+          <Rect
+            key={h.id}
+            ref={(node) => {
+              if (node) boxRefs.current.set(h.id, node);
+              else boxRefs.current.delete(h.id);
+            }}
+            x={h.x}
+            y={h.y}
+            width={h.w}
+            height={h.h}
+            fill={h.color}
+            opacity={h.opacity}
+            stroke={h.id === selectedId ? "#1f2937" : undefined}
+            strokeWidth={h.id === selectedId ? 1 : 0}
+            dash={h.id === selectedId ? [4, 3] : undefined}
+            strokeScaleEnabled={false}
+            draggable={tool === "select"}
+            onMouseDown={(e) => {
+              if (tool === "select") {
+                e.cancelBubble = true;
+                setSelectedId(h.id);
+              }
+            }}
+            onDragEnd={(e) => {
+              const { x, y } = e.target.position();
+              setHighlights((prev) => prev.map((h2) => (h2.id === h.id ? { ...h2, x, y } : h2)));
+            }}
+            onTransformEnd={(e) => {
+              const node = e.target as Konva.Rect;
+              const sx = node.scaleX(), sy = node.scaleY();
+              node.scaleX(1);
+              node.scaleY(1);
+              setHighlights((prev) =>
+                prev.map((h2) =>
+                  h2.id === h.id
+                    ? {
+                        ...h2,
+                        x: node.x(),
+                        y: node.y(),
+                        w: Math.max(5, node.width() * sx),
+                        h: Math.max(4, node.height() * sy),
+                      }
+                    : h2
+                )
+              );
+            }}
+          />
+        ))}
 
         {boxes.map((b) => (
           <Rect

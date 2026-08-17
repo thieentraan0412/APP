@@ -1027,15 +1027,19 @@ function App() {
     }
   }
 
-  async function onSaveShortcuts(capture: string, record: string, region: string, pause: string, regionRecord: string) {
+  // Lưu ngay mỗi lần đổi một phím (màn Cài đặt không còn nút Lưu). Trả về false khi không
+  // lưu được để ô phím bên đó tự trả về giá trị cũ, và KHÔNG rời màn hình — người dùng
+  // đang đổi dở các phím khác.
+  async function onSaveShortcuts(capture: string, record: string, region: string, pause: string, regionRecord: string): Promise<boolean> {
     // H8: các phím tắt phải KHÁC nhau. Nếu trùng, khi Rust đăng ký sẽ lỗi giữa chừng
     // (sau khi đã gỡ hết phím cũ) → mọi phím tắt toàn cục chết tới khi khởi động lại.
+    // Màn Cài đặt đã tự hoán đổi khi trùng, đây là lớp chặn cuối trước khi gọi Rust.
     const entries: [string, string][] = [["Chụp", capture], ["Quay", record], ["Chụp vùng", region], ["Tạm dừng", pause], ["Quay vùng", regionRecord]];
     for (let i = 0; i < entries.length; i++) {
       for (let j = i + 1; j < entries.length; j++) {
         if (entries[i][1] === entries[j][1]) {
           showToast(`Phím tắt trùng: "${entries[i][0]}" và "${entries[j][0]}" cùng là ${prettyKey(entries[i][1])}`);
-          return;
+          return false;
         }
       }
     }
@@ -1045,9 +1049,10 @@ function App() {
       setShortcuts(cfg);
       localStorage.setItem("shortcuts", JSON.stringify(cfg));
       showToast("Đã lưu phím tắt");
-      backHome();
+      return true;
     } catch (err) {
       showToast("Lưu phím tắt lỗi: " + String(err));
+      return false;
     }
   }
 

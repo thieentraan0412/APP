@@ -442,9 +442,15 @@ kbd {
   display: flex;
   gap: 0.6rem;
   flex-wrap: wrap;
+  align-items: center;
   margin-top: 1.15rem;
   padding-top: 1.15rem;
   border-top: 1px solid var(--border);
+}
+/* Ghi chú sau khi tự hoán đổi hai phím trùng nhau */
+.settings-hint {
+  font-size: 0.78rem;
+  color: var(--muted, #8a919d);
 }
 /* Hàng hành động không gạch phân cách (card ít nội dung) */
 .settings-card-actions {
@@ -577,6 +583,58 @@ kbd {
   background: var(--primary);
   color: #fff;
   border-color: var(--primary);
+}
+
+/* Hàng tuỳ chọn của bút tô sáng — cao 44px, khớp SUBTOOLBAR_H trong EditorScreen */
+.toolbar--sub {
+  height: 44px;
+  gap: 0.4rem;
+  background: var(--surface-2, #f7f8fa);
+}
+.tb-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted, #6b7280);
+}
+.tb-value {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted, #6b7280);
+  min-width: 38px;
+}
+.tb-hint {
+  font-size: 0.76rem;
+  color: var(--muted, #9aa1ac);
+}
+.tb-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 0.35rem;
+}
+/* Ô màu trên nút "Tô sáng" để biết đang cầm màu nào mà không cần mở hàng tuỳ chọn */
+.hl-swatch {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  vertical-align: -1px;
+}
+.hl-color {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+.hl-color.active {
+  border-color: var(--primary);
+}
+.hl-range {
+  width: 118px;
 }
 
 .title-input {

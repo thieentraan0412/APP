@@ -7,7 +7,8 @@ interface Props {
   region: string;
   pause: string;
   regionRecord: string;
-  onSave: (capture: string, record: string, region: string, pause: string, regionRecord: string) => void;
+  /** Lưu ngay khi đổi. Trả về false nếu không lưu được → ô phím quay lại giá trị cũ. */
+  onSave: (capture: string, record: string, region: string, pause: string, regionRecord: string) => Promise<boolean>;
   onBack: () => void;
   onCheckUpdate: () => void;
   updateChecking: boolean;
@@ -66,10 +67,12 @@ const PowerIcon = (
 function ShortcutCapture({
   label,
   value,
+  disabled,
   onChange,
 }: {
   label: string;
   value: string;
+  disabled: boolean;
   onChange: (v: string) => void;
 }) {
   const [listening, setListening] = useState(false);
@@ -78,6 +81,7 @@ function ShortcutCapture({
       <span className="setting-label">{label}</span>
       <button
         className={"shortcut-key" + (listening ? " active" : "")}
+        disabled={disabled}
         onClick={() => setListening(true)}
         onBlur={() => setListening(false)}
         onKeyDown={(e) => {
@@ -96,12 +100,64 @@ function ShortcutCapture({
   );
 }
 
+interface Keys {
+  capture: string;
+  record: string;
+  region: string;
+  pause: string;
+  regionRecord: string;
+}
+
+const KEY_LABELS: Record<keyof Keys, string> = {
+  capture: "Chụp ảnh",
+  region: "Chụp vùng màn hình",
+  record: "Quay / dừng video",
+  regionRecord: "Quay vùng màn hình",
+  pause: "Tạm dừng / quay tiếp",
+};
+
+const DEFAULT_KEYS: Keys = {
+  capture: "Control+Shift+1",
+  region: "Control+Shift+3",
+  record: "Control+Shift+2",
+  pause: "Control+Shift+H",
+  regionRecord: "Control+Shift+4",
+};
+
 export function SettingsScreen({ capture, record, region, pause, regionRecord, onSave, onBack, onCheckUpdate, updateChecking, userEmail, onLogout }: Props) {
-  const [cap, setCap] = useState(capture);
-  const [rec, setRec] = useState(record);
-  const [reg, setReg] = useState(region);
-  const [pau, setPau] = useState(pause);
-  const [recReg, setRecReg] = useState(regionRecord);
+  const [keys, setKeys] = useState<Keys>({ capture, record, region, pause, regionRecord });
+  const [saving, setSaving] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
+
+  // Lưu ngay, không đợi bấm nút. Hiện giá trị mới trước cho khỏi khựng, nhưng nếu lưu hỏng
+  // thì trả ô về giá trị cũ — ô phím không được hiển thị thứ chưa thực sự có hiệu lực.
+  async function apply(next: Keys) {
+    const prev = keys;
+    setKeys(next);
+    setSaving(true);
+    try {
+      const ok = await onSave(next.capture, next.record, next.region, next.pause, next.regionRecord);
+      if (!ok) setKeys(prev);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function change(field: keyof Keys, value: string) {
+    if (keys[field] === value) return; // nhấn lại đúng phím cũ → khỏi lưu
+    const next = { ...keys, [field]: value };
+    // Phím vừa nhấn đang thuộc hành động khác → HOÁN ĐỔI hai bên. Nếu chỉ báo trùng rồi
+    // từ chối, người dùng không thể tráo phím giữa hai hành động: bước nào cũng vướng
+    // trùng, muốn tráo phải mượn tạm một phím thứ ba.
+    const clash = (Object.keys(keys) as (keyof Keys)[]).find((k) => k !== field && keys[k] === value);
+    if (clash) {
+      next[clash] = keys[field];
+      setHint(`Đã hoán đổi với “${KEY_LABELS[clash]}”`);
+    } else {
+      setHint(null);
+    }
+    apply(next);
+  }
 
   // Tự khởi động cùng máy — đọc trạng thái thật từ hệ điều hành khi mở Cài đặt.
   const [autostart, setAutostart] = useState(false);
@@ -149,31 +205,22 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
               <h3 className="settings-card-title">Phím tắt toàn cục</h3>
               <p className="settings-card-desc">
                 Bấm vào ô bên phải rồi nhấn tổ hợp phím mới (cần ít nhất một phím Ctrl / Shift / Alt).
+                Đổi xong là lưu ngay, không cần bấm nút nào.
               </p>
             </div>
           </div>
           <div className="settings-card-body">
-            <ShortcutCapture label="Chụp ảnh" value={cap} onChange={setCap} />
-            <ShortcutCapture label="Chụp vùng màn hình" value={reg} onChange={setReg} />
-            <ShortcutCapture label="Quay / dừng video" value={rec} onChange={setRec} />
-            <ShortcutCapture label="Quay vùng màn hình" value={recReg} onChange={setRecReg} />
-            <ShortcutCapture label="Tạm dừng / quay tiếp" value={pau} onChange={setPau} />
+            <ShortcutCapture label={KEY_LABELS.capture} value={keys.capture} disabled={saving} onChange={(v) => change("capture", v)} />
+            <ShortcutCapture label={KEY_LABELS.region} value={keys.region} disabled={saving} onChange={(v) => change("region", v)} />
+            <ShortcutCapture label={KEY_LABELS.record} value={keys.record} disabled={saving} onChange={(v) => change("record", v)} />
+            <ShortcutCapture label={KEY_LABELS.regionRecord} value={keys.regionRecord} disabled={saving} onChange={(v) => change("regionRecord", v)} />
+            <ShortcutCapture label={KEY_LABELS.pause} value={keys.pause} disabled={saving} onChange={(v) => change("pause", v)} />
           </div>
           <div className="settings-card-footer">
-            <button className="primary" onClick={() => onSave(cap, rec, reg, pau, recReg)}>
-              Lưu phím tắt
-            </button>
-            <button
-              onClick={() => {
-                setCap("Control+Shift+1");
-                setReg("Control+Shift+3");
-                setRec("Control+Shift+2");
-                setPau("Control+Shift+H");
-                setRecReg("Control+Shift+4");
-              }}
-            >
+            <button disabled={saving} onClick={() => { setHint(null); apply(DEFAULT_KEYS); }}>
               Khôi phục mặc định
             </button>
+            {hint && <span className="settings-hint">{hint}</span>}
           </div>
         </section>
 

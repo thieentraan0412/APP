@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
-import { AnnotateCanvas } from "../components/AnnotateCanvas";
-import { Toolbar } from "../components/Toolbar";
+import { AnnotateCanvas, HIGHLIGHT_OPACITY } from "../components/AnnotateCanvas";
+import { Toolbar, HIGHLIGHT_COLORS } from "../components/Toolbar";
 import { flattenStage, dataUrlToBlob, imageToWebpBlob } from "../lib/flatten";
-import type { Annotations, Arrow, Box, Note, StepMarker, Tool } from "../types";
+import type { Annotations, Arrow, Box, Highlight, Note, StepMarker, Tool } from "../types";
 import { nanoid } from "nanoid";
 import jsQR from "jsqr";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -13,11 +13,14 @@ type ClipItem =
   | { kind: "box"; data: Box }
   | { kind: "arrow"; data: Arrow }
   | { kind: "step"; data: StepMarker }
-  | { kind: "note"; data: Note };
+  | { kind: "note"; data: Note }
+  | { kind: "highlight"; data: Highlight };
 
 const COLOR = "#ff2d2d"; // màu khung + note (đỏ)
 const TOOLBAR_H = 56;
+const SUBTOOLBAR_H = 44; // hàng tuỳ chọn của bút tô sáng (chỉ hiện khi đang dùng bút đó)
 const PADDING = 24;
+const DEFAULT_HL_THICKNESS = 20;
 
 interface Props {
   imageDataUrl: string;
@@ -34,6 +37,10 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const [arrows, setArrows] = useState<Arrow[]>([]);
   const [steps, setSteps] = useState<StepMarker[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [highlightColor, setHighlightColor] = useState(HIGHLIGHT_COLORS[0].value);
+  const [highlightThickness, setHighlightThickness] = useState(DEFAULT_HL_THICKNESS);
+  const [highlightOpacity, setHighlightOpacity] = useState(HIGHLIGHT_OPACITY);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
@@ -47,7 +54,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // ── Undo/Redo ──────────────────────────────────────────────
   // Lưu lịch sử "ảnh chụp" trạng thái annotate. Ghi theo debounce 300ms để gộp
   // các thay đổi liên tục (kéo vẽ khung/mũi tên, kéo thả) thành 1 bước undo.
-  type Snapshot = { boxes: Box[]; arrows: Arrow[]; steps: StepMarker[]; notes: Note[] };
+  type Snapshot = { boxes: Box[]; arrows: Arrow[]; steps: StepMarker[]; notes: Note[]; highlights: Highlight[] };
   const history = useRef<Snapshot[]>([]);
   const histIndex = useRef(-1);
   const skipRecord = useRef(false); // true = trạng thái đổi do undo/redo → không ghi history
@@ -153,6 +160,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         if (step) { clipboard.current = { kind: "step", data: step }; return; }
         const note = notes.find((n) => n.id === selectedId);
         if (note) { clipboard.current = { kind: "note", data: note }; return; }
+        const hl = highlights.find((h) => h.id === selectedId);
+        if (hl) { clipboard.current = { kind: "highlight", data: hl }; return; }
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "v") {
         e.preventDefault();
@@ -169,6 +178,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
           setSteps((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
         } else if (clip.kind === "note") {
           setNotes((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
+        } else if (clip.kind === "highlight") {
+          setHighlights((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
         }
         setSelectedId(newId);
         return;
@@ -184,24 +195,35 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // Tính tỉ lệ hiển thị vừa khít khung
   const fit = useMemo(() => {
     if (!img) return { scale: 1, w: 0, h: 0 };
+    // Hàng tuỳ chọn bút tô sáng chiếm thêm một dòng → trừ luôn, nếu không ảnh cao hơn
+    // vùng còn lại và sinh thanh cuộn. Đổi tỉ lệ thì hiệu ứng H6 bên dưới tự co giãn
+    // mọi chú thích theo, nên không lệch khỏi nền.
+    const subShown = tool === "highlight" || highlights.some((h) => h.id === selectedId);
     const maxW = viewport.w - PADDING * 2;
-    const maxH = viewport.h - TOOLBAR_H - PADDING * 2;
+    const maxH = viewport.h - TOOLBAR_H - (subShown ? SUBTOOLBAR_H : 0) - PADDING * 2;
     const scale = Math.min(maxW / img.width, maxH / img.height, 1);
     return { scale, w: img.width * scale, h: img.height * scale };
-  }, [img, viewport]);
+    // highlights/selectedId chỉ dùng để biết hàng tuỳ chọn có hiện hay không.
+  }, [img, viewport, tool, highlights, selectedId]);
 
   // Nạp annotate cũ khi mở để SỬA (toạ độ gốc → toạ độ hiển thị)
   useEffect(() => {
     if (!img || appliedInit.current) return;
-    let base: Snapshot = { boxes: [], arrows: [], steps: [], notes: [] };
+    let base: Snapshot = { boxes: [], arrows: [], steps: [], notes: [], highlights: [] };
     if (initialAnnotations) {
       const s = fit.scale;
       const b = initialAnnotations.boxes.map((x) => ({ ...x, x: x.x * s, y: x.y * s, w: x.w * s, h: x.h * s }));
       const a = (initialAnnotations.arrows ?? []).map((x) => ({ ...x, x1: x.x1 * s, y1: x.y1 * s, x2: x.x2 * s, y2: x.y2 * s }));
       const st = (initialAnnotations.steps ?? []).map((x) => ({ ...x, x: x.x * s, y: x.y * s }));
       const n = initialAnnotations.notes.map((x) => ({ ...x, x: x.x * s, y: x.y * s }));
-      setBoxes(b); setArrows(a); setSteps(st); setNotes(n);
-      base = { boxes: b, arrows: a, steps: st, notes: n };
+      // Bản lưu trước khi có bút tô sáng không có trường này → mặc định rỗng.
+      const hl = (initialAnnotations.highlights ?? []).map((x) => ({
+        ...x,
+        x: x.x * s, y: x.y * s, w: x.w * s, h: x.h * s,
+        opacity: x.opacity ?? HIGHLIGHT_OPACITY,
+      }));
+      setBoxes(b); setArrows(a); setSteps(st); setNotes(n); setHighlights(hl);
+      base = { boxes: b, arrows: a, steps: st, notes: n, highlights: hl };
       skipRecord.current = true; // nạp ban đầu không tính là 1 bước undo
     }
     // Seed baseline: undo sẽ dừng ở trạng thái mở ban đầu, không lùi quá
@@ -226,8 +248,35 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setArrows((prev) => prev.map((a) => ({ ...a, x1: a.x1 * r, y1: a.y1 * r, x2: a.x2 * r, y2: a.y2 * r })));
     setSteps((prev) => prev.map((st) => ({ ...st, x: st.x * r, y: st.y * r })));
     setNotes((prev) => prev.map((n) => ({ ...n, x: n.x * r, y: n.y * r })));
+    setHighlights((prev) => prev.map((h) => ({ ...h, x: h.x * r, y: h.y * r, w: h.w * r, h: h.h * r })));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fit.scale, img]);
+
+  // Vệt tô đang được chọn (nếu có) — để thanh công cụ chỉnh thẳng vào nó.
+  const selectedHighlight = highlights.find((h) => h.id === selectedId) ?? null;
+
+  // Đổi độ dày: áp cho vệt đang chọn luôn. Dải mỏng khiến hai tay cầm trên/dưới của khung
+  // chọn nằm sát nhau, kéo rất khó trúng — chỉnh bằng thanh trượt thì chắc tay hơn nhiều.
+  // Giữ nguyên tâm dọc để vệt dày lên/mỏng đi tại chỗ, không trôi khỏi dòng chữ.
+  function changeHighlightThickness(n: number) {
+    setHighlightThickness(n);
+    if (!selectedHighlight) return;
+    setHighlights((prev) =>
+      prev.map((h) => (h.id === selectedHighlight.id ? { ...h, y: h.y + (h.h - n) / 2, h: n } : h))
+    );
+  }
+
+  function changeHighlightColor(c: string) {
+    setHighlightColor(c);
+    if (!selectedHighlight) return;
+    setHighlights((prev) => prev.map((h) => (h.id === selectedHighlight.id ? { ...h, color: c } : h)));
+  }
+
+  function changeHighlightOpacity(o: number) {
+    setHighlightOpacity(o);
+    if (!selectedHighlight) return;
+    setHighlights((prev) => prev.map((h) => (h.id === selectedHighlight.id ? { ...h, opacity: o } : h)));
+  }
 
   function deleteSelected() {
     if (!selectedId) return;
@@ -235,6 +284,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setArrows((prev) => prev.filter((a) => a.id !== selectedId));
     setSteps((prev) => prev.filter((st) => st.id !== selectedId));
     setNotes((prev) => prev.filter((n) => n.id !== selectedId));
+    setHighlights((prev) => prev.filter((h) => h.id !== selectedId));
     setSelectedId(null);
   }
 
@@ -245,14 +295,15 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       arrows: s.arrows.map((x) => ({ ...x })),
       steps: s.steps.map((x) => ({ ...x })),
       notes: s.notes.map((x) => ({ ...x })),
+      highlights: s.highlights.map((x) => ({ ...x })),
     };
   }
   function snapKey(s: Snapshot): string {
-    return JSON.stringify([s.boxes, s.arrows, s.steps, s.notes]);
+    return JSON.stringify([s.boxes, s.arrows, s.steps, s.notes, s.highlights]);
   }
   // Ghi ngay trạng thái hiện tại vào history (bỏ qua nếu trùng bước trước đó)
   function recordNow() {
-    const snap = cloneSnap({ boxes, arrows, steps, notes });
+    const snap = cloneSnap({ boxes, arrows, steps, notes, highlights });
     const cur = history.current[histIndex.current];
     if (cur && snapKey(cur) === snapKey(snap)) return;
     history.current = history.current.slice(0, histIndex.current + 1);
@@ -273,6 +324,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setArrows(snap.arrows.map((x) => ({ ...x })));
     setSteps(snap.steps.map((x) => ({ ...x })));
     setNotes(snap.notes.map((x) => ({ ...x })));
+    setHighlights(snap.highlights.map((x) => ({ ...x })));
     setSelectedId(null);
   }
   function undo() {
@@ -342,7 +394,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     }, 300);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, boxes, arrows, steps, notes, fit.scale]);
+  }, [img, boxes, arrows, steps, notes, highlights, fit.scale]);
 
   // Ghi history mỗi khi annotate đổi (debounce 300ms → gộp thao tác kéo/vẽ thành 1 bước)
   useEffect(() => {
@@ -357,7 +409,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       if (pendingRec.current != null) { window.clearTimeout(pendingRec.current); pendingRec.current = null; }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, boxes, arrows, steps, notes]);
+  }, [img, boxes, arrows, steps, notes, highlights]);
 
   async function handleSave() {
     if (!stageRef.current || !img) return;
@@ -384,6 +436,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       arrows: arrows.map((a) => ({ ...a, x1: a.x1 / s, y1: a.y1 / s, x2: a.x2 / s, y2: a.y2 / s })),
       steps: steps.map((st) => ({ ...st, x: st.x / s, y: st.y / s })),
       notes: notes.map((n) => ({ ...n, x: n.x / s, y: n.y / s })),
+      highlights: highlights.map((h) => ({ ...h, x: h.x / s, y: h.y / s, w: h.w / s, h: h.h / s })),
     };
 
     // Ảnh gốc (để sau này sửa lại annotate) — nén WebP cho nhẹ.
@@ -459,6 +512,14 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         title={title}
         setTitle={setTitle}
         onScanQr={scanQr}
+        highlightColor={selectedHighlight ? selectedHighlight.color : highlightColor}
+        setHighlightColor={changeHighlightColor}
+        highlightThickness={selectedHighlight ? Math.round(selectedHighlight.h) : highlightThickness}
+        setHighlightThickness={changeHighlightThickness}
+        highlightOpacity={selectedHighlight ? selectedHighlight.opacity : highlightOpacity}
+        setHighlightOpacity={changeHighlightOpacity}
+        showHighlightOptions={tool === "highlight" || !!selectedHighlight}
+        editingSelected={!!selectedHighlight}
       />
       <div className="canvas-area">
         {img && (
@@ -469,6 +530,11 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
             color={COLOR}
             tool={tool}
             setTool={setTool}
+            highlightColor={highlightColor}
+            highlightThickness={highlightThickness}
+            highlightOpacity={highlightOpacity}
+            highlights={highlights}
+            setHighlights={setHighlights}
             boxes={boxes}
             setBoxes={setBoxes}
             arrows={arrows}
@@ -484,7 +550,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         )}
       </div>
       <p className="hint editor-hint">
-        Mẹo: <b>Khung</b> kéo vẽ ô · <b>Mũi tên</b> kéo vẽ · <b>Bước</b> bấm để đặt số thứ tự · <b>Ghi chú</b> bấm để thêm chữ (đúp để sửa).
+        Mẹo: <b>Khung</b> kéo vẽ ô · <b>Tô sáng</b> kéo ngang qua dòng chữ (tô liên tiếp được nhiều dòng) · <b>Mũi tên</b> kéo vẽ · <b>Bước</b> bấm để đặt số thứ tự · <b>Ghi chú</b> bấm để thêm chữ (đúp để sửa).
         Chọn phần tử rồi nhấn <b>Delete</b> để xoá.
       </p>
     </div>
