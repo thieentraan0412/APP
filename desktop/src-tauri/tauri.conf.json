@@ -16,6 +16,8 @@
         "title": "Chụp & Chia sẻ",
         "width": 980,
         "height": 680,
+        "minWidth": 700,
+        "minHeight": 520,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AsyncDns --disable-quic --no-proxy-server --dns-over-https-mode=off"
       },
       {

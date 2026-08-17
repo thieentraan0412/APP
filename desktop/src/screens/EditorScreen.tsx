@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
-import { AnnotateCanvas, HIGHLIGHT_OPACITY } from "../components/AnnotateCanvas";
+import { AnnotateCanvas, HIGHLIGHT_OPACITY, measureInfo, toImagePoint } from "../components/AnnotateCanvas";
 import { Toolbar, HIGHLIGHT_COLORS } from "../components/Toolbar";
 import { flattenStage, dataUrlToBlob, imageToWebpBlob } from "../lib/flatten";
-import type { Annotations, Arrow, Box, Highlight, Note, StepMarker, Tool } from "../types";
+import type { Annotations, Arrow, Box, Highlight, Measure, Note, Shape, StepMarker, Tool } from "../types";
 import { nanoid } from "nanoid";
 import jsQR from "jsqr";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -14,13 +14,15 @@ type ClipItem =
   | { kind: "arrow"; data: Arrow }
   | { kind: "step"; data: StepMarker }
   | { kind: "note"; data: Note }
-  | { kind: "highlight"; data: Highlight };
+  | { kind: "highlight"; data: Highlight }
+  | { kind: "measure"; data: Measure }
+  | { kind: "shape"; data: Shape };
 
 const COLOR = "#ff2d2d"; // màu khung + note (đỏ)
-const TOOLBAR_H = 56;
-const SUBTOOLBAR_H = 44; // hàng tuỳ chọn của bút tô sáng (chỉ hiện khi đang dùng bút đó)
-const PADDING = 24;
+const PADDING = 24; // khớp padding của .canvas-area trong App.css
 const DEFAULT_HL_THICKNESS = 20;
+// Bán kính làm mờ mặc định: đủ để chữ cỡ thường không đọc lại được.
+const DEFAULT_BLUR = 14;
 
 interface Props {
   imageDataUrl: string;
@@ -38,14 +40,27 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const [steps, setSteps] = useState<StepMarker[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
   const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [measures, setMeasures] = useState<Measure[]>([]);
+  const [shapes, setShapes] = useState<Shape[]>([]);
   const [highlightColor, setHighlightColor] = useState(HIGHLIGHT_COLORS[0].value);
   const [highlightThickness, setHighlightThickness] = useState(DEFAULT_HL_THICKNESS);
   const [highlightOpacity, setHighlightOpacity] = useState(HIGHLIGHT_OPACITY);
+  // Số cho mốc Bước kế tiếp. Là con dấu đếm, KHÔNG suy ra từ các mốc đang có: có vậy mới
+  // đặt lại về ① để đánh một luồng mới, hoặc bắt đầu từ số bất kỳ.
+  const [stepNext, setStepNext] = useState(1);
+  // Mặc định BẬT: đặt mốc là mở ô nhập luôn. Mốc Bước gần như lúc nào cũng cần chữ đi kèm
+  // ("① Chọn sản phẩm"), số trơ trọi ít dùng — ai chỉ cần số thì tắt ô này.
+  const [stepWithText, setStepWithText] = useState(true);
+  const [blurStrength, setBlurStrength] = useState(DEFAULT_BLUR);
+  // Màu vừa hút (hex) — hiện trên thanh công cụ và đã copy vào clipboard.
+  const [pickedColor, setPickedColor] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
   const [title, setTitle] = useState(initialTitle ?? "");
-  const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
+  // Kích thước vùng canvas, do ResizeObserver đo được (0 = chưa đo lần nào)
+  const [area, setArea] = useState({ w: 0, h: 0 });
+  const canvasAreaRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const appliedInit = useRef(false);
   const lastScale = useRef<number | null>(null); // tỉ lệ hiển thị lần trước, để rescale khi resize (H6)
@@ -54,9 +69,15 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // ── Undo/Redo ──────────────────────────────────────────────
   // Lưu lịch sử "ảnh chụp" trạng thái annotate. Ghi theo debounce 300ms để gộp
   // các thay đổi liên tục (kéo vẽ khung/mũi tên, kéo thả) thành 1 bước undo.
-  type Snapshot = { boxes: Box[]; arrows: Arrow[]; steps: StepMarker[]; notes: Note[]; highlights: Highlight[] };
+  // stepNext nằm trong ảnh chụp để hoàn tác một mốc Bước thì con dấu đếm lùi về theo,
+  // không để tình trạng vừa undo mất mốc ③ mà lần đóng sau đã nhảy sang ④.
+  type Snapshot = { boxes: Box[]; arrows: Arrow[]; steps: StepMarker[]; notes: Note[]; highlights: Highlight[]; measures: Measure[]; shapes: Shape[]; stepNext: number };
   const history = useRef<Snapshot[]>([]);
   const histIndex = useRef(-1);
+  // Lịch sử nằm trong ref (không gây render lại), nên nút Hoàn tác/Làm lại phải có cờ state
+  // riêng — dựa trực tiếp vào ref thì trạng thái bật/tắt của nút luôn chậm một nhịp.
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const skipRecord = useRef(false); // true = trạng thái đổi do undo/redo → không ghi history
   const pendingRec = useRef<number | null>(null);
 
@@ -104,11 +125,21 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     image.src = imageDataUrl;
   }, [imageDataUrl]);
 
-  // Theo dõi kích thước cửa sổ để vừa khít ảnh
+  // Theo dõi kích thước THẬT của vùng canvas (đổi khi resize cửa sổ, khi hàng tuỳ chọn
+  // hiện/ẩn, khi dòng gợi ý xuống hai dòng…). Bỏ qua chênh lệch dưới 1px để tránh vòng lặp
+  // với thanh cuộn của chính vùng đó.
   useEffect(() => {
-    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    const el = canvasAreaRef.current;
+    if (!el) return;
+    const apply = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      setArea((prev) => (Math.abs(prev.w - w) < 1 && Math.abs(prev.h - h) < 1 ? prev : { w, h }));
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
 
   // Phím tắt trong editor
@@ -162,6 +193,10 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         if (note) { clipboard.current = { kind: "note", data: note }; return; }
         const hl = highlights.find((h) => h.id === selectedId);
         if (hl) { clipboard.current = { kind: "highlight", data: hl }; return; }
+        const me = measures.find((m) => m.id === selectedId);
+        if (me) { clipboard.current = { kind: "measure", data: me }; return; }
+        const sh = shapes.find((x) => x.id === selectedId);
+        if (sh) { clipboard.current = { kind: "shape", data: sh }; return; }
       }
       if ((e.ctrlKey || e.metaKey) && e.key === "v") {
         e.preventDefault();
@@ -180,6 +215,18 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
           setNotes((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
         } else if (clip.kind === "highlight") {
           setHighlights((prev) => [...prev, { ...clip.data, id: newId, x: clip.data.x + D, y: clip.data.y + D }]);
+        } else if (clip.kind === "shape") {
+          const d = clip.data;
+          setShapes((prev) => [
+            ...prev,
+            d.kind === "ellipse" || d.kind === "blur"
+              ? { ...d, id: newId, x: d.x + D, y: d.y + D }
+              : d.kind === "line"
+                ? { ...d, id: newId, x1: d.x1 + D, y1: d.y1 + D, x2: d.x2 + D, y2: d.y2 + D }
+                : { ...d, id: newId, points: d.points.map((v) => v + D) },
+          ]);
+        } else if (clip.kind === "measure") {
+          setMeasures((prev) => [...prev, { ...clip.data, id: newId, x1: clip.data.x1 + D, y1: clip.data.y1 + D, x2: clip.data.x2 + D, y2: clip.data.y2 + D }]);
         }
         setSelectedId(newId);
         return;
@@ -192,24 +239,23 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  // Tính tỉ lệ hiển thị vừa khít khung
+  // Tỉ lệ hiển thị vừa khít khung. ĐO vùng canvas thật thay vì lấy kích thước cửa sổ trừ
+  // đi các hằng số chiều cao: trước đây TOOLBAR_H = 56 trong khi thanh công cụ thật cao
+  // 60px, lại không trừ dòng gợi ý phía dưới, nên ảnh luôn hơi quá khổ và sinh thanh cuộn
+  // — càng lộ khi cửa sổ nhỏ. Đo trực tiếp thì mọi hàng phụ hiện/ẩn đều tự vào đúng chỗ.
   const fit = useMemo(() => {
-    if (!img) return { scale: 1, w: 0, h: 0 };
-    // Hàng tuỳ chọn bút tô sáng chiếm thêm một dòng → trừ luôn, nếu không ảnh cao hơn
-    // vùng còn lại và sinh thanh cuộn. Đổi tỉ lệ thì hiệu ứng H6 bên dưới tự co giãn
-    // mọi chú thích theo, nên không lệch khỏi nền.
-    const subShown = tool === "highlight" || highlights.some((h) => h.id === selectedId);
-    const maxW = viewport.w - PADDING * 2;
-    const maxH = viewport.h - TOOLBAR_H - (subShown ? SUBTOOLBAR_H : 0) - PADDING * 2;
+    if (!img || area.w === 0 || area.h === 0) return { scale: 1, w: 0, h: 0 };
+    const maxW = area.w - PADDING * 2;
+    const maxH = area.h - PADDING * 2;
+    if (maxW <= 0 || maxH <= 0) return { scale: 1, w: 0, h: 0 };
     const scale = Math.min(maxW / img.width, maxH / img.height, 1);
     return { scale, w: img.width * scale, h: img.height * scale };
-    // highlights/selectedId chỉ dùng để biết hàng tuỳ chọn có hiện hay không.
-  }, [img, viewport, tool, highlights, selectedId]);
+  }, [img, area]);
 
   // Nạp annotate cũ khi mở để SỬA (toạ độ gốc → toạ độ hiển thị)
   useEffect(() => {
     if (!img || appliedInit.current) return;
-    let base: Snapshot = { boxes: [], arrows: [], steps: [], notes: [], highlights: [] };
+    let base: Snapshot = { boxes: [], arrows: [], steps: [], notes: [], highlights: [], measures: [], shapes: [], stepNext: 1 };
     if (initialAnnotations) {
       const s = fit.scale;
       const b = initialAnnotations.boxes.map((x) => ({ ...x, x: x.x * s, y: x.y * s, w: x.w * s, h: x.h * s }));
@@ -222,8 +268,24 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         x: x.x * s, y: x.y * s, w: x.w * s, h: x.h * s,
         opacity: x.opacity ?? HIGHLIGHT_OPACITY,
       }));
-      setBoxes(b); setArrows(a); setSteps(st); setNotes(n); setHighlights(hl);
-      base = { boxes: b, arrows: a, steps: st, notes: n, highlights: hl };
+      const sh = (initialAnnotations.shapes ?? []).map((x) =>
+        x.kind === "ellipse"
+          ? { ...x, x: x.x * s, y: x.y * s, w: x.w * s, h: x.h * s }
+            : x.kind === "blur"
+              ? { ...x, x: x.x * s, y: x.y * s, w: x.w * s, h: x.h * s, strength: x.strength * s }
+          : x.kind === "line"
+            ? { ...x, x1: x.x1 * s, y1: x.y1 * s, x2: x.x2 * s, y2: x.y2 * s }
+            : { ...x, points: x.points.map((v) => v * s), width: x.width }
+      );
+      const ms = (initialAnnotations.measures ?? []).map((x) => ({
+        ...x,
+        x1: x.x1 * s, y1: x.y1 * s, x2: x.x2 * s, y2: x.y2 * s,
+      }));
+      setBoxes(b); setArrows(a); setSteps(st); setNotes(n); setHighlights(hl); setMeasures(ms); setShapes(sh);
+      // Mở ảnh cũ ra sửa thì đánh tiếp từ sau mốc lớn nhất, không quay về ① đè số cũ.
+      const next = st.length > 0 ? Math.max(...st.map((x) => x.step)) + 1 : 1;
+      setStepNext(next);
+      base = { boxes: b, arrows: a, steps: st, notes: n, highlights: hl, measures: ms, shapes: sh, stepNext: next };
       skipRecord.current = true; // nạp ban đầu không tính là 1 bước undo
     }
     // Seed baseline: undo sẽ dừng ở trạng thái mở ban đầu, không lùi quá
@@ -249,11 +311,38 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setSteps((prev) => prev.map((st) => ({ ...st, x: st.x * r, y: st.y * r })));
     setNotes((prev) => prev.map((n) => ({ ...n, x: n.x * r, y: n.y * r })));
     setHighlights((prev) => prev.map((h) => ({ ...h, x: h.x * r, y: h.y * r, w: h.w * r, h: h.h * r })));
+    setMeasures((prev) => prev.map((m) => ({ ...m, x1: m.x1 * r, y1: m.y1 * r, x2: m.x2 * r, y2: m.y2 * r })));
+    setShapes((prev) =>
+      prev.map((sh) =>
+        sh.kind === "ellipse"
+          ? { ...sh, x: sh.x * r, y: sh.y * r, w: sh.w * r, h: sh.h * r }
+            : sh.kind === "blur"
+              ? { ...sh, x: sh.x * r, y: sh.y * r, w: sh.w * r, h: sh.h * r, strength: sh.strength * r }
+          : sh.kind === "line"
+            ? { ...sh, x1: sh.x1 * r, y1: sh.y1 * r, x2: sh.x2 * r, y2: sh.y2 * r }
+            : { ...sh, points: sh.points.map((v) => v * r) }
+      )
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fit.scale, img]);
 
   // Vệt tô đang được chọn (nếu có) — để thanh công cụ chỉnh thẳng vào nó.
   const selectedHighlight = highlights.find((h) => h.id === selectedId) ?? null;
+
+  // Số đo của thước đang chọn, quy về pixel ảnh gốc để hiện trên thanh công cụ.
+  const selectedMeasure = measures.find((m) => m.id === selectedId) ?? null;
+  const measureReadout = selectedMeasure
+    ? (() => {
+        const info = measureInfo(selectedMeasure, fit.scale);
+        return {
+          w: info.w,
+          h: info.h,
+          dist: info.dist,
+          from: toImagePoint(selectedMeasure.x1, selectedMeasure.y1, fit.scale),
+          to: toImagePoint(selectedMeasure.x2, selectedMeasure.y2, fit.scale),
+        };
+      })()
+    : null;
 
   // Đổi độ dày: áp cho vệt đang chọn luôn. Dải mỏng khiến hai tay cầm trên/dưới của khung
   // chọn nằm sát nhau, kéo rất khó trúng — chỉnh bằng thanh trượt thì chắc tay hơn nhiều.
@@ -272,6 +361,27 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setHighlights((prev) => prev.map((h) => (h.id === selectedHighlight.id ? { ...h, color: c } : h)));
   }
 
+  // Hút màu: copy luôn mã hex vào clipboard — lấy màu ra là để dán vào chỗ khác.
+  async function handlePickColor(hex: string) {
+    setPickedColor(hex);
+    try {
+      await writeText(hex);
+      setCopyMsg(`Đã copy ${hex}`);
+    } catch {
+      setCopyMsg(hex); // copy hỏng thì vẫn hiện mã để người dùng tự ghi lại
+    }
+    window.setTimeout(() => setCopyMsg(null), 1800);
+  }
+
+  // Đổi độ mờ: áp cho vùng che đang chọn luôn, giống cách thanh độ dày làm với vệt tô sáng.
+  function changeBlurStrength(n: number) {
+    setBlurStrength(n);
+    if (!selectedId) return;
+    setShapes((prev) =>
+      prev.map((s) => (s.id === selectedId && s.kind === "blur" ? { ...s, strength: n } : s))
+    );
+  }
+
   function changeHighlightOpacity(o: number) {
     setHighlightOpacity(o);
     if (!selectedHighlight) return;
@@ -285,6 +395,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setSteps((prev) => prev.filter((st) => st.id !== selectedId));
     setNotes((prev) => prev.filter((n) => n.id !== selectedId));
     setHighlights((prev) => prev.filter((h) => h.id !== selectedId));
+    setMeasures((prev) => prev.filter((m) => m.id !== selectedId));
+    setShapes((prev) => prev.filter((s) => s.id !== selectedId));
     setSelectedId(null);
   }
 
@@ -296,19 +408,29 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       steps: s.steps.map((x) => ({ ...x })),
       notes: s.notes.map((x) => ({ ...x })),
       highlights: s.highlights.map((x) => ({ ...x })),
+      measures: s.measures.map((x) => ({ ...x })),
+      shapes: s.shapes.map((x) => ({ ...x })),
+      stepNext: s.stepNext,
     };
   }
+  // So sánh dedup CHỈ theo hình vẽ: đổi mỗi con số sắp đóng thì không đáng một bước undo.
   function snapKey(s: Snapshot): string {
-    return JSON.stringify([s.boxes, s.arrows, s.steps, s.notes, s.highlights]);
+    return JSON.stringify([s.boxes, s.arrows, s.steps, s.notes, s.highlights, s.measures, s.shapes]);
   }
   // Ghi ngay trạng thái hiện tại vào history (bỏ qua nếu trùng bước trước đó)
   function recordNow() {
-    const snap = cloneSnap({ boxes, arrows, steps, notes, highlights });
+    const snap = cloneSnap({ boxes, arrows, steps, notes, highlights, measures, shapes, stepNext });
     const cur = history.current[histIndex.current];
     if (cur && snapKey(cur) === snapKey(snap)) return;
     history.current = history.current.slice(0, histIndex.current + 1);
     history.current.push(snap);
     histIndex.current = history.current.length - 1;
+    syncHistFlags();
+  }
+  // Đồng bộ cờ bật/tắt cho nút Hoàn tác/Làm lại sau mỗi lần lịch sử thay đổi.
+  function syncHistFlags() {
+    setCanUndo(histIndex.current > 0);
+    setCanRedo(histIndex.current < history.current.length - 1);
   }
   // Ghi ngay nếu còn bản chờ debounce — gọi trước undo/redo để không sót thao tác vừa làm
   function flushRecord() {
@@ -325,6 +447,9 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setSteps(snap.steps.map((x) => ({ ...x })));
     setNotes(snap.notes.map((x) => ({ ...x })));
     setHighlights(snap.highlights.map((x) => ({ ...x })));
+    setMeasures(snap.measures.map((x) => ({ ...x })));
+    setShapes(snap.shapes.map((x) => ({ ...x })));
+    setStepNext(snap.stepNext);
     setSelectedId(null);
   }
   function undo() {
@@ -332,12 +457,14 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     if (histIndex.current <= 0) return;
     histIndex.current -= 1;
     restoreSnap(history.current[histIndex.current]);
+    syncHistFlags();
   }
   function redo() {
     flushRecord();
     if (histIndex.current >= history.current.length - 1) return;
     histIndex.current += 1;
     restoreSnap(history.current[histIndex.current]);
+    syncHistFlags();
   }
 
   // Xuất ảnh đã gộp (nền + khung + mũi tên + bước + ghi chú) ra PNG.
@@ -394,7 +521,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     }, 300);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, boxes, arrows, steps, notes, highlights, fit.scale]);
+  }, [img, boxes, arrows, steps, notes, highlights, measures, shapes, fit.scale]);
 
   // Ghi history mỗi khi annotate đổi (debounce 300ms → gộp thao tác kéo/vẽ thành 1 bước)
   useEffect(() => {
@@ -409,7 +536,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       if (pendingRec.current != null) { window.clearTimeout(pendingRec.current); pendingRec.current = null; }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [img, boxes, arrows, steps, notes, highlights]);
+  }, [img, boxes, arrows, steps, notes, highlights, measures, shapes]);
 
   async function handleSave() {
     if (!stageRef.current || !img) return;
@@ -437,6 +564,16 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       steps: steps.map((st) => ({ ...st, x: st.x / s, y: st.y / s })),
       notes: notes.map((n) => ({ ...n, x: n.x / s, y: n.y / s })),
       highlights: highlights.map((h) => ({ ...h, x: h.x / s, y: h.y / s, w: h.w / s, h: h.h / s })),
+      measures: measures.map((m) => ({ ...m, x1: m.x1 / s, y1: m.y1 / s, x2: m.x2 / s, y2: m.y2 / s })),
+      shapes: shapes.map((sh) =>
+        sh.kind === "ellipse"
+          ? { ...sh, x: sh.x / s, y: sh.y / s, w: sh.w / s, h: sh.h / s }
+            : sh.kind === "blur"
+              ? { ...sh, x: sh.x / s, y: sh.y / s, w: sh.w / s, h: sh.h / s, strength: sh.strength / s }
+          : sh.kind === "line"
+            ? { ...sh, x1: sh.x1 / s, y1: sh.y1 / s, x2: sh.x2 / s, y2: sh.y2 / s }
+            : { ...sh, points: sh.points.map((v) => v / s) }
+      ),
     };
 
     // Ảnh gốc (để sau này sửa lại annotate) — nén WebP cho nhẹ.
@@ -512,6 +649,10 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         title={title}
         setTitle={setTitle}
         onScanQr={scanQr}
+        onUndo={undo}
+        onRedo={redo}
+        canUndo={canUndo}
+        canRedo={canRedo}
         highlightColor={selectedHighlight ? selectedHighlight.color : highlightColor}
         setHighlightColor={changeHighlightColor}
         highlightThickness={selectedHighlight ? Math.round(selectedHighlight.h) : highlightThickness}
@@ -520,8 +661,16 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         setHighlightOpacity={changeHighlightOpacity}
         showHighlightOptions={tool === "highlight" || !!selectedHighlight}
         editingSelected={!!selectedHighlight}
+        stepNext={stepNext}
+        setStepNext={setStepNext}
+        stepWithText={stepWithText}
+        setStepWithText={setStepWithText}
+        measureReadout={measureReadout}
+        blurStrength={blurStrength}
+        setBlurStrength={changeBlurStrength}
+        pickedColor={pickedColor}
       />
-      <div className="canvas-area">
+      <div className="canvas-area" ref={canvasAreaRef}>
         {img && (
           <AnnotateCanvas
             image={img}
@@ -530,6 +679,16 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
             color={COLOR}
             tool={tool}
             setTool={setTool}
+            stepNext={stepNext}
+            setStepNext={setStepNext}
+            stepWithText={stepWithText}
+            blurStrength={blurStrength}
+            onPickColor={handlePickColor}
+            shapes={shapes}
+            setShapes={setShapes}
+            measures={measures}
+            setMeasures={setMeasures}
+            scale={fit.scale}
             highlightColor={highlightColor}
             highlightThickness={highlightThickness}
             highlightOpacity={highlightOpacity}
@@ -550,7 +709,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         )}
       </div>
       <p className="hint editor-hint">
-        Mẹo: <b>Khung</b> kéo vẽ ô · <b>Tô sáng</b> kéo ngang qua dòng chữ (tô liên tiếp được nhiều dòng) · <b>Mũi tên</b> kéo vẽ · <b>Bước</b> bấm để đặt số thứ tự · <b>Ghi chú</b> bấm để thêm chữ (đúp để sửa).
+        Mẹo: <b>Khung ▾</b> đổi giữa khung, hình tròn, đường thẳng và bút vẽ tay · <b>Tô sáng</b> kéo ngang qua dòng chữ · <b>Bước</b> bấm liên tiếp để đặt ①②③… · <b>Ghi chú</b> bấm để thêm chữ (đúp để sửa) · <b>⋮ Thêm</b> có hoàn tác, làm lại và đo kích thước.
         Chọn phần tử rồi nhấn <b>Delete</b> để xoá.
       </p>
     </div>

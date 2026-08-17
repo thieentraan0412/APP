@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Stage, Layer, Image as KImage, Rect, Text, Arrow as KArrow, Circle, Group, Transformer } from "react-konva";
-import type Konva from "konva";
+import { Stage, Layer, Image as KImage, Rect, Text, Arrow as KArrow, Circle, Ellipse, Group, Line, Transformer } from "react-konva";
+// Nhập dạng GIÁ TRỊ (không phải `import type`) vì cần Konva.Filters.Blur cho vùng che mờ.
+import Konva from "konva";
 import { nanoid } from "nanoid";
-import type { Arrow, Box, Highlight, Note, StepMarker, Tool } from "../types";
+import type { Arrow, Box, Highlight, Measure, Note, Shape, StepMarker, Tool } from "../types";
 
 interface Props {
   image: HTMLImageElement;
@@ -11,6 +12,21 @@ interface Props {
   color: string;
   tool: Tool;
   setTool: (t: Tool) => void;
+  /** Số sẽ đóng cho mốc Bước tiếp theo (đóng xong tự tăng) */
+  stepNext: number;
+  setStepNext: (n: number) => void;
+  /** true = đặt mốc xong mở ô nhập chữ luôn */
+  stepWithText: boolean;
+  /** Bán kính làm mờ cho vùng che sắp vẽ */
+  blurStrength: number;
+  /** Hút màu: trả mã hex của pixel vừa bấm (theo ảnh gốc, không tính chú thích vẽ đè) */
+  onPickColor: (hex: string) => void;
+  shapes: Shape[];
+  setShapes: React.Dispatch<React.SetStateAction<Shape[]>>;
+  measures: Measure[];
+  setMeasures: React.Dispatch<React.SetStateAction<Measure[]>>;
+  /** Tỉ lệ hiển thị ảnh (fit.scale) — để đổi số đo về pixel ảnh GỐC */
+  scale: number;
   /** Màu + độ dày + độ đậm của bút tô sáng đang chọn trên thanh công cụ */
   highlightColor: string;
   highlightThickness: number;
@@ -33,14 +49,213 @@ interface Props {
 // Đủ mờ để đọc được chữ bên dưới, đủ đậm để nhìn là thấy ngay.
 export const HIGHLIGHT_OPACITY = 0.38;
 
+// Chữ của mốc Bước đặt cách tâm vòng tròn ngần này pixel (bán kính vòng là 18) để không
+// đè lên con số.
+const STEP_TEXT_DX = 25;
+
 // Kéo dọc phải vượt mép dải THÊM ngần này pixel mới coi là muốn tô cả khối. Trước đây
 // ngưỡng lấy đúng bằng độ dày: đặt bút mảnh 8px thì tay rung hơn 8px là đã nhảy sang tô
 // khối, nên chỉnh độ dày như không có tác dụng — mọi vệt đều phình thành khối.
 const BLOCK_MARGIN = 26;
 
+// Độ dày nét bút vẽ tay.
+const PEN_WIDTH = 3;
+
+/** Mã hex của một pixel trên ảnh gốc. Vẽ đúng 1×1 pixel ra canvas tạm nên rất nhẹ. */
+function pixelHex(img: HTMLImageElement, ix: number, iy: number): string | null {
+  const x = Math.floor(ix);
+  const y = Math.floor(iy);
+  if (x < 0 || y < 0 || x >= img.naturalWidth || y >= img.naturalHeight) return null;
+  try {
+    const c = document.createElement("canvas");
+    c.width = 1;
+    c.height = 1;
+    const ctx = c.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(img, x, y, 1, 1, 0, 0, 1, 1);
+    const d = ctx.getImageData(0, 0, 1, 1).data;
+    return "#" + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return null; // ảnh chéo origin (không xảy ra với data URL) → bỏ qua thay vì nổ
+  }
+}
+
+// Màu thước đo: xanh, để không lẫn với khung/mũi tên/ghi chú (đỏ) trên cùng một ảnh.
+export const MEASURE_COLOR = "#0b63f6";
+// Nét gạch vuông góc ở hai đầu thước, dài (mỗi bên) ngần này pixel hiển thị.
+const CAP = 7;
+
+/** Số đo theo pixel ẢNH GỐC + nhãn hiện trên ảnh. `scale` là tỉ lệ đang hiển thị. */
+export function measureInfo(m: Measure, scale: number) {
+  const s = scale > 0 ? scale : 1;
+  const dx = m.x2 - m.x1;
+  const dy = m.y2 - m.y1;
+  const w = Math.round(Math.abs(dx) / s);
+  const h = Math.round(Math.abs(dy) / s);
+  const dist = Math.round(Math.hypot(dx, dy) / s);
+  // Gần như nằm ngang/dọc (lệch dưới 4px hiển thị) thì chỉ hiện một chiều cho gọn —
+  // "320 px" đọc nhanh hơn "320 × 1 px".
+  const horizontal = Math.abs(dy) < 4;
+  const vertical = Math.abs(dx) < 4;
+  const label = horizontal ? `${w} px` : vertical ? `${h} px` : `${w} × ${h} px`;
+  return { w, h, dist, label, horizontal, vertical };
+}
+
+/** Toạ độ pixel ảnh gốc của một điểm trên canvas. */
+export function toImagePoint(x: number, y: number, scale: number) {
+  const s = scale > 0 ? scale : 1;
+  return { x: Math.round(x / s), y: Math.round(y / s) };
+}
+
+// Chữ đi kèm mốc Bước. Tự bọc dòng trong khoảng trống còn lại, và nhảy sang bên trái khi
+// mốc nằm sát mép phải — để nguyên bên phải thì chữ chạy ra ngoài ảnh và bị cắt mất lúc xuất.
+// Viền trắng quanh chữ (stroke + fillAfterStrokeEnabled) để đọc được cả trên nền tối.
+function StepText({ s, stageWidth }: { s: StepMarker; stageWidth: number }) {
+  const roomRight = stageWidth - s.x - STEP_TEXT_DX - 6;
+  const roomLeft = s.x - STEP_TEXT_DX - 6;
+  const onRight = roomRight >= 140 || roomRight >= roomLeft;
+  const boxW = Math.max(60, onRight ? roomRight : roomLeft);
+  return (
+    <Text
+      text={s.text ?? ""}
+      x={onRight ? STEP_TEXT_DX : -(STEP_TEXT_DX + boxW)}
+      width={boxW}
+      align={onRight ? "left" : "right"}
+      wrap="word"
+      offsetY={9}
+      fontSize={17}
+      fontStyle="bold"
+      fill={s.color}
+      stroke="white"
+      strokeWidth={2.5}
+      fillAfterStrokeEnabled
+      lineHeight={1.25}
+      listening={false}
+    />
+  );
+}
+
+// Vùng che mờ: vẽ lại đúng miếng ảnh nền đó rồi áp bộ lọc Blur lên trên.
+// Konva chỉ áp filter cho node ĐÃ cache, nên phải gọi cache() lại mỗi khi vùng hoặc độ mờ
+// đổi — thiếu bước này vùng hiện ra sắc nét như không có gì.
+// `crop` phải tính theo pixel ảnh GỐC (chia tỉ lệ hiển thị), còn x/y/width/height là toạ độ
+// trên canvas — lẫn hai hệ này là miếng ảnh lấy sai chỗ.
+function BlurRegion({
+  image, s, scale, interactive, onSelect, onMove,
+}: {
+  image: HTMLImageElement;
+  s: Extract<Shape, { kind: "blur" }>;
+  scale: number;
+  interactive: boolean;
+  onSelect: () => void;
+  onMove: (x: number, y: number) => void;
+}) {
+  const ref = useRef<Konva.Image>(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || s.w < 1 || s.h < 1) return;
+    node.cache();
+    node.getLayer()?.batchDraw();
+  }, [s.x, s.y, s.w, s.h, s.strength, scale, image]);
+
+  const sc = scale > 0 ? scale : 1;
+  return (
+    <KImage
+      ref={ref}
+      image={image}
+      x={s.x}
+      y={s.y}
+      width={s.w}
+      height={s.h}
+      crop={{ x: s.x / sc, y: s.y / sc, width: s.w / sc, height: s.h / sc }}
+      filters={[Konva.Filters.Blur]}
+      blurRadius={s.strength}
+      draggable={interactive}
+      listening={interactive}
+      onMouseDown={(e) => {
+        if (!interactive) return;
+        e.cancelBubble = true;
+        onSelect();
+      }}
+      onDragEnd={(e) => onMove(e.target.x(), e.target.y())}
+    />
+  );
+}
+
+// Một thước đo: mũi hai đầu + gạch vuông góc chặn hai đầu + nhãn số đo.
+// KHÔNG kéo thả được — thước gắn với đúng chỗ đã đo, xê dịch đi là nhãn nói dối. Nhưng
+// phải bấm chọn được (hitStrokeWidth nới rộng vì nét chỉ 2px) để còn xoá được về sau.
+function MeasureShape({
+  m, scale, selected, interactive, onSelect,
+}: {
+  m: Measure;
+  scale: number;
+  selected: boolean;
+  interactive: boolean;
+  onSelect: () => void;
+}) {
+  const { label } = measureInfo(m, scale);
+  const dx = m.x2 - m.x1;
+  const dy = m.y2 - m.y1;
+  const len = Math.hypot(dx, dy) || 1;
+  // Pháp tuyến đơn vị — dùng để vẽ gạch chặn hai đầu và đẩy nhãn ra khỏi thân thước.
+  const nx = -dy / len;
+  const ny = dx / len;
+  const mid = { x: (m.x1 + m.x2) / 2, y: (m.y1 + m.y2) / 2 };
+  const width = selected ? 2.5 : 2;
+  return (
+    <>
+      <KArrow
+        points={[m.x1, m.y1, m.x2, m.y2]}
+        stroke={m.color}
+        fill={m.color}
+        strokeWidth={width}
+        pointerAtBeginning
+        pointerLength={9}
+        pointerWidth={7}
+        strokeScaleEnabled={false}
+        dash={selected ? [7, 4] : undefined}
+        listening={interactive}
+        hitStrokeWidth={14}
+        onMouseDown={(e) => {
+          if (!interactive) return;
+          e.cancelBubble = true;
+          onSelect();
+        }}
+      />
+      {[[m.x1, m.y1], [m.x2, m.y2]].map(([px, py], i) => (
+        <Line
+          key={i}
+          points={[px - nx * CAP, py - ny * CAP, px + nx * CAP, py + ny * CAP]}
+          stroke={m.color}
+          strokeWidth={width}
+          strokeScaleEnabled={false}
+          listening={false}
+        />
+      ))}
+      <Text
+        text={label}
+        x={mid.x + nx * 13}
+        y={mid.y + ny * 13}
+        offsetX={label.length * 4.2}
+        offsetY={8}
+        fontSize={15}
+        fontStyle="bold"
+        fill={m.color}
+        stroke="white"
+        strokeWidth={2.5}
+        fillAfterStrokeEnabled
+        listening={false}
+      />
+    </>
+  );
+}
+
 export function AnnotateCanvas(props: Props) {
   const {
     image, width, height, color, tool, setTool,
+    stepNext, setStepNext, stepWithText, blurStrength, onPickColor,
+    shapes, setShapes, measures, setMeasures, scale,
     highlightColor, highlightThickness, highlightOpacity, highlights, setHighlights,
     boxes, setBoxes, arrows, setArrows, steps, setSteps, notes, setNotes, selectedId, setSelectedId, stageRef,
   } = props;
@@ -53,24 +268,33 @@ export function AnnotateCanvas(props: Props) {
   // lấy từ thanh công cụ chứ không phụ thuộc kéo dọc (đúng kiểu bút dạ quang).
   // `block` = đã chuyển sang chế độ tô cả khối cho nét này (xem BLOCK_MARGIN).
   const hlDrawing = useRef<{ id: string; sx: number; cy: number; block: boolean } | null>(null);
+  const measureDrawing = useRef<{ id: string; sx: number; sy: number } | null>(null);
+  // Hình tròn / đường thẳng: giữ điểm bắt đầu. Nét bút: chỉ cần id, điểm cộng dồn vào state.
+  const shapeDrawing = useRef<{ id: string; kind: Shape["kind"]; sx: number; sy: number } | null>(null);
 
-  // Sửa ghi chú trực tiếp tại vị trí note (thay cho prompt)
-  const [editing, setEditing] = useState<{ id: string; left: number; top: number } | null>(null);
+  // Sửa chữ trực tiếp tại chỗ (thay cho prompt) — dùng cho cả Ghi chú và nội dung mốc Bước
+  type EditKind = "note" | "step";
+  const [editing, setEditing] = useState<{ id: string; kind: EditKind; left: number; top: number } | null>(null);
   const [draft, setDraft] = useState("");
   const draftRef = useRef("");          // luôn giữ giá trị mới nhất — tránh stale closure
-  const editingRef = useRef<string | null>(null);
+  const editingRef = useRef<{ id: string; kind: EditKind } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const openedAt = useRef(0);
 
-  // Mở ô nhập ngay tại toạ độ note (theo vị trí màn hình)
-  function openNoteEditor(id: string, stageX: number, stageY: number, text: string) {
+  // Mở ô nhập ngay tại toạ độ phần tử (theo vị trí màn hình)
+  function openEditor(kind: EditKind, id: string, stageX: number, stageY: number, text: string) {
     const rect = stageRef.current?.container().getBoundingClientRect();
     if (!rect) return;
-    editingRef.current = id;
+    // Đang gõ dở ở một ô khác (vd bấm đặt mốc kế tiếp khi chưa Ctrl+Enter) → CHỐT chữ đó
+    // trước. Chromium chạy mousedown xong mới chạy blur, nên nếu không chốt ở đây thì
+    // editingRef/draftRef đã bị ghi đè sang mốc mới; blur sau đó commit chuỗi rỗng và chữ
+    // vừa gõ mất trắng.
+    if (editingRef.current && editingRef.current.id !== id) finishEdit(true);
+    editingRef.current = { id, kind };
     openedAt.current = performance.now();
     setDraft(text);
     draftRef.current = text;
-    setEditing({ id, left: rect.left + stageX, top: rect.top + stageY });
+    setEditing({ id, kind, left: rect.left + stageX, top: rect.top + stageY });
   }
 
   // Bảo đảm ô nhập được focus sau khi hiện (autoFocus có thể bị click trên canvas cướp mất)
@@ -86,12 +310,21 @@ export function AnnotateCanvas(props: Props) {
 
   // Kết thúc sửa: lưu (text rỗng → xoá note) hoặc huỷ (note mới rỗng → xoá)
   // Dùng draftRef.current thay vì draft để tránh stale closure trong concurrent mode
-  function finishNote(save: boolean) {
-    const id = editingRef.current;
-    if (!id) return;
+  function finishEdit(save: boolean) {
+    const cur = editingRef.current;
+    if (!cur) return;
+    const { id, kind } = cur;
     editingRef.current = null;
     setEditing(null);
     const text = draftRef.current.trim();
+
+    // Mốc Bước: chữ rỗng thì chỉ bỏ chữ, KHÔNG xoá mốc — con số đứng một mình vẫn có nghĩa.
+    // (Ghi chú thì khác: không có chữ là không còn gì để hiện, nên xoá luôn.)
+    if (kind === "step") {
+      if (save) setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, text } : s)));
+      return;
+    }
+
     if (save) {
       if (!text) {
         setNotes((prev) => prev.filter((x) => x.id !== id));
@@ -148,14 +381,55 @@ export function AnnotateCanvas(props: Props) {
       return;
     }
 
+    // Hút màu: lấy màu ngay tại pixel bấm vào, đọc từ ảnh GỐC nên chú thích vẽ đè lên
+    // không làm sai màu. Không tạo phần tử nào trên ảnh.
+    if (tool === "eyedrop") {
+      const hex = pixelHex(image, pos.x / (scale > 0 ? scale : 1), pos.y / (scale > 0 ? scale : 1));
+      if (hex) onPickColor(hex);
+      return;
+    }
+
+    if (tool === "ellipse" || tool === "line" || tool === "pen" || tool === "blur") {
+      const id = nanoid(6);
+      shapeDrawing.current = { id, kind: tool, sx: pos.x, sy: pos.y };
+      const next: Shape =
+        tool === "ellipse"
+          ? { kind: "ellipse", id, x: pos.x, y: pos.y, w: 0, h: 0, color }
+          : tool === "line"
+            ? { kind: "line", id, x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y, color }
+            : tool === "blur"
+              ? { kind: "blur", id, x: pos.x, y: pos.y, w: 0, h: 0, strength: blurStrength }
+              : { kind: "pen", id, points: [pos.x, pos.y], color, width: PEN_WIDTH };
+      setShapes((prev) => [...prev, next]);
+      setSelectedId(null);
+      return;
+    }
+
+    if (tool === "measure") {
+      const id = nanoid(6);
+      measureDrawing.current = { id, sx: pos.x, sy: pos.y };
+      setMeasures((prev) => [
+        ...prev,
+        { id, x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y, color: MEASURE_COLOR },
+      ]);
+      setSelectedId(null);
+      return;
+    }
+
     if (tool === "step") {
       // chỉ đặt khi click vào nền, không vào element đang có
       if (e.target !== stage && e.target.name() !== "bg") return;
       const id = nanoid(6);
-      const nextStep = Math.max(0, ...steps.map((s) => s.step)) + 1;
-      setSteps((prev) => [...prev, { id, x: pos.x, y: pos.y, step: nextStep, color }]);
-      setSelectedId(id);
-      setTool("select");
+      setSteps((prev) => [...prev, { id, x: pos.x, y: pos.y, step: stepNext, color, text: "" }]);
+      setStepNext(stepNext + 1);
+      // Giữ nguyên công cụ Bước để bấm tiếp ra ②③④… Trước đây tự nhảy về Chọn nên đánh
+      // một luồng 5 bước phải bấm lại nút Bước 5 lần.
+      // Không chọn mốc vừa đặt: vòng viền trắng của mốc đang chọn cứ nhảy theo từng lần
+      // bấm, nhìn rối mà chẳng để làm gì khi đang đánh số liên tiếp.
+      setSelectedId(null);
+      // Bật "nhập chữ ngay" thì mở ô nhập luôn — bấm, gõ, bấm chỗ tiếp, gõ… Tắt thì chỉ
+      // đóng số cho nhanh, chữ thêm sau bằng cách bấm đúp vào mốc.
+      if (stepWithText) openEditor("step", id, pos.x + STEP_TEXT_DX, pos.y - 12, "");
       return;
     }
 
@@ -164,7 +438,7 @@ export function AnnotateCanvas(props: Props) {
       setNotes((prev) => [...prev, { id, x: pos.x, y: pos.y, text: "", color }]);
       setSelectedId(id);
       setTool("select");
-      openNoteEditor(id, pos.x, pos.y, "");
+      openEditor("note", id, pos.x, pos.y, "");
       return;
     }
 
@@ -189,6 +463,58 @@ export function AnnotateCanvas(props: Props) {
     if (arrowDrawing.current) {
       const { id } = arrowDrawing.current;
       setArrows((prev) => prev.map((a) => (a.id === id ? { ...a, x2: pos.x, y2: pos.y } : a)));
+    }
+
+    if (shapeDrawing.current) {
+      const { id, sx, sy } = shapeDrawing.current;
+      setShapes((prev) =>
+        prev.map((s) => {
+          if (s.id !== id) return s;
+          if (s.kind === "ellipse") {
+            // Giữ Shift = tròn đều (bán kính hai chiều bằng nhau).
+            let w = Math.abs(pos.x - sx);
+            let h = Math.abs(pos.y - sy);
+            if (e.evt.shiftKey) { const r = Math.max(w, h); w = r; h = r; }
+            return { ...s, x: Math.min(sx, pos.x), y: Math.min(sy, pos.y), w, h };
+          }
+          if (s.kind === "blur") {
+            return {
+              ...s,
+              x: Math.min(sx, pos.x),
+              y: Math.min(sy, pos.y),
+              w: Math.abs(pos.x - sx),
+              h: Math.abs(pos.y - sy),
+            };
+          }
+          if (s.kind === "line") {
+            let x2 = pos.x, y2 = pos.y;
+            if (e.evt.shiftKey) {
+              if (Math.abs(pos.x - sx) >= Math.abs(pos.y - sy)) y2 = sy;
+              else x2 = sx;
+            }
+            return { ...s, x2, y2 };
+          }
+          // Nét bút: chỉ ghi thêm điểm khi con trỏ đi đủ xa, nếu không mỗi giây có hàng
+          // trăm điểm trùng nhau làm nét nặng và file annotate phình vô ích.
+          const n = s.points.length;
+          const lastX = s.points[n - 2], lastY = s.points[n - 1];
+          if (Math.hypot(pos.x - lastX, pos.y - lastY) < 2.5) return s;
+          return { ...s, points: [...s.points, pos.x, pos.y] };
+        })
+      );
+    }
+
+    if (measureDrawing.current) {
+      const { id, sx, sy } = measureDrawing.current;
+      // Giữ Shift = khoá theo trục trội hơn. Đo chiều rộng/chiều cao thật khó kéo thẳng
+      // tay, lệch vài pixel là nhãn đổi thành "320 × 3 px" — Shift cho số sạch.
+      let x2 = pos.x;
+      let y2 = pos.y;
+      if (e.evt.shiftKey) {
+        if (Math.abs(pos.x - sx) >= Math.abs(pos.y - sy)) y2 = sy;
+        else x2 = sx;
+      }
+      setMeasures((prev) => prev.map((m) => (m.id === id ? { ...m, x2, y2 } : m)));
     }
 
     if (hlDrawing.current) {
@@ -234,6 +560,43 @@ export function AnnotateCanvas(props: Props) {
       setTool("select");
     }
 
+    if (shapeDrawing.current) {
+      const { id, kind } = shapeDrawing.current;
+      shapeDrawing.current = null;
+      setShapes((prev) =>
+        prev.filter((s) => {
+          if (s.id !== id) return true;
+          // Bấm nhầm không kéo → bỏ, khỏi để lại hình 0px hoặc nét bút một điểm.
+          if (s.kind === "ellipse" || s.kind === "blur") return s.w >= 5 && s.h >= 5;
+          if (s.kind === "line") return Math.hypot(s.x2 - s.x1, s.y2 - s.y1) >= 6;
+          return s.points.length >= 6;
+        })
+      );
+      // Nét bút và che mờ giữ nguyên công cụ (thường làm nhiều chỗ liền: che email, che số
+      // điện thoại, che số tài khoản); hình tròn/đường thẳng vẽ lẻ nên trả về Chọn như
+      // Khung/Mũi tên để chỉnh ngay.
+      if (kind === "pen" || kind === "blur") {
+        setSelectedId(null);
+      } else {
+        setSelectedId(id);
+        setTool("select");
+      }
+    }
+
+    if (measureDrawing.current) {
+      const id = measureDrawing.current.id;
+      measureDrawing.current = null;
+      setMeasures((prev) => {
+        const m = prev.find((x) => x.id === id);
+        // Bấm nhầm không kéo → bỏ, khỏi để lại thước 0px.
+        if (m && Math.hypot(m.x2 - m.x1, m.y2 - m.y1) < 6) return prev.filter((x) => x.id !== id);
+        return prev;
+      });
+      // Chọn thước vừa đo để thanh công cụ hiện đủ số (toạ độ, W, H, khoảng cách), nhưng
+      // GIỮ công cụ để đo tiếp chỗ khác — đo thường đo vài chỗ liền nhau.
+      setSelectedId(id);
+    }
+
     if (hlDrawing.current) {
       const id = hlDrawing.current.id;
       hlDrawing.current = null;
@@ -260,6 +623,24 @@ export function AnnotateCanvas(props: Props) {
     >
       <Layer>
         <KImage image={image} width={width} height={height} name="bg" />
+
+        {/* Che mờ vẽ ngay sau ảnh nền: nó phải phủ được ảnh, nhưng phải nằm DƯỚI mọi chú
+            thích — che mờ đè lên khung/mũi tên/chữ thì làm nhoè luôn chú thích. */}
+        {shapes.map((s) =>
+          s.kind === "blur" ? (
+            <BlurRegion
+              key={s.id}
+              image={image}
+              s={s}
+              scale={scale}
+              interactive={tool === "select"}
+              onSelect={() => setSelectedId(s.id)}
+              onMove={(x, y) =>
+                setShapes((prev) => prev.map((s2) => (s2.id === s.id && s2.kind === "blur" ? { ...s2, x, y } : s2)))
+              }
+            />
+          ) : null
+        )}
 
         {/* Vẽ trước mọi thứ khác: dải mờ nằm DƯỚI khung/mũi tên/chữ, nếu không nó phủ
             một lớp màu lên chúng và làm chú thích bị xỉn màu. */}
@@ -361,6 +742,86 @@ export function AnnotateCanvas(props: Props) {
           />
         ))}
 
+        {shapes.map((s) => {
+          if (s.kind === "blur") return null; // đã vẽ ở lớp dưới, ngay trên ảnh nền
+          const pick = (e: Konva.KonvaEventObject<MouseEvent>) => {
+            if (tool !== "select") return;
+            e.cancelBubble = true;
+            setSelectedId(s.id);
+          };
+          const selected = s.id === selectedId;
+          const stroke = selected ? 4 : 3;
+
+          if (s.kind === "ellipse") {
+            return (
+              <Ellipse
+                key={s.id}
+                x={s.x + s.w / 2}
+                y={s.y + s.h / 2}
+                radiusX={s.w / 2}
+                radiusY={s.h / 2}
+                stroke={s.color}
+                strokeWidth={stroke}
+                strokeScaleEnabled={false}
+                draggable={tool === "select"}
+                onMouseDown={pick}
+                onDragEnd={(e) => {
+                  // Konva cho toạ độ TÂM, còn state lưu góc trên-trái → trừ lại nửa cạnh.
+                  const { x, y } = e.target.position();
+                  setShapes((prev) =>
+                    prev.map((s2) =>
+                      s2.id === s.id && s2.kind === "ellipse"
+                        ? { ...s2, x: x - s2.w / 2, y: y - s2.h / 2 }
+                        : s2
+                    )
+                  );
+                }}
+              />
+            );
+          }
+
+          // Đường thẳng và nét bút cùng là Line, chỉ khác tập điểm và độ dày.
+          const points = s.kind === "line" ? [s.x1, s.y1, s.x2, s.y2] : s.points;
+          return (
+            <Line
+              key={s.id}
+              points={points}
+              stroke={s.color}
+              strokeWidth={s.kind === "pen" ? (selected ? s.width + 1 : s.width) : stroke}
+              lineCap="round"
+              lineJoin="round"
+              // Làm mượt nét vẽ tay; đường thẳng phải để 0 nếu không hai đầu bị uốn.
+              tension={s.kind === "pen" ? 0.35 : 0}
+              strokeScaleEnabled={false}
+              // Nét mảnh 3px gần như không bấm trúng → nới vùng bắt chuột.
+              hitStrokeWidth={14}
+              draggable={tool === "select"}
+              onMouseDown={pick}
+              onDragEnd={(e) => {
+                // Line kéo xong nằm ở offset (x,y); dồn offset đó vào chính toạ độ điểm rồi
+                // đưa node về 0 — nếu không, lần render sau React vẽ lại theo points cũ và
+                // hình nhảy về chỗ ban đầu.
+                const node = e.target;
+                const dx = node.x();
+                const dy = node.y();
+                node.position({ x: 0, y: 0 });
+                setShapes((prev) =>
+                  prev.map((s2) => {
+                    if (s2.id !== s.id) return s2;
+                    if (s2.kind === "line") {
+                      return { ...s2, x1: s2.x1 + dx, y1: s2.y1 + dy, x2: s2.x2 + dx, y2: s2.y2 + dy };
+                    }
+                    if (s2.kind === "pen") {
+                      return { ...s2, points: s2.points.map((v, i) => (i % 2 === 0 ? v + dx : v + dy)) };
+                    }
+                    return s2;
+                  })
+                );
+              }}
+            />
+          );
+        })}
+
         {arrows.map((a) => (
           <KArrow
             key={a.id}
@@ -408,6 +869,7 @@ export function AnnotateCanvas(props: Props) {
                 setSelectedId(s.id);
               }
             }}
+            onDblClick={() => openEditor("step", s.id, s.x + STEP_TEXT_DX, s.y - 12, s.text ?? "")}
             onDragEnd={(e) => {
               const { x, y } = e.target.position();
               setSteps((prev) => prev.map((s2) => (s2.id === s.id ? { ...s2, x, y } : s2)));
@@ -435,6 +897,10 @@ export function AnnotateCanvas(props: Props) {
               verticalAlign="middle"
               listening={false}
             />
+            {/* Nội dung bước, nằm cạnh con số. Đang sửa thì ẩn đi để không thấy hai lần
+                (một trên canvas, một trong ô nhập đè lên). Viền trắng mảnh quanh chữ để
+                đọc được cả khi nền ảnh tối. */}
+            {!!s.text && editing?.id !== s.id && <StepText s={s} stageWidth={width} />}
           </Group>
         ))}
 
@@ -457,7 +923,7 @@ export function AnnotateCanvas(props: Props) {
                 setSelectedId(n.id);
               }
             }}
-            onDblClick={() => openNoteEditor(n.id, n.x, n.y, n.text)}
+            onDblClick={() => openEditor("note", n.id, n.x, n.y, n.text)}
             onDragEnd={(e) => {
               const { x, y } = e.target.position();
               setNotes((prev) => prev.map((x2) => (x2.id === n.id ? { ...x2, x, y } : x2)));
@@ -465,6 +931,18 @@ export function AnnotateCanvas(props: Props) {
           />
           )
         )}
+
+        {/* Thước đo vẽ sau cùng: nhãn số là thứ phải đọc được, không để khung/vệt tô che. */}
+        {measures.map((m) => (
+          <MeasureShape
+            key={m.id}
+            m={m}
+            scale={scale}
+            selected={m.id === selectedId}
+            interactive={tool === "select"}
+            onSelect={() => setSelectedId(m.id)}
+          />
+        ))}
 
         <Transformer
           ref={trRef}
@@ -493,10 +971,10 @@ export function AnnotateCanvas(props: Props) {
         onKeyDown={(e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
             e.preventDefault();
-            finishNote(true);
+            finishEdit(true);
           } else if (e.key === "Escape") {
             e.preventDefault();
-            finishNote(false);
+            finishEdit(false);
           }
           // Enter đơn thuần = xuống dòng (textarea default)
         }}
@@ -505,7 +983,7 @@ export function AnnotateCanvas(props: Props) {
             inputRef.current?.focus();
             return;
           }
-          finishNote(true);
+          finishEdit(true);
         }}
       />
     )}

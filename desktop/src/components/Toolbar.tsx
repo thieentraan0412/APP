@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import type { Tool } from "../types";
 
 // Bảng màu bút tô sáng. Vàng đứng đầu vì đó là màu mặc định quen thuộc của bút dạ quang.
@@ -15,6 +16,19 @@ export const HIGHLIGHT_MAX = 60;
 // — mà tô sáng là để làm nổi chữ chứ không phải bôi đen nó.
 export const OPACITY_MIN = 10;
 export const OPACITY_MAX = 85;
+// Bán kính làm mờ. Dưới 6 vẫn đọc mò được chữ (che mà không che), trên 40 thì cả vùng
+// thành một mảng xám vô nghĩa.
+export const BLUR_MIN = 6;
+export const BLUR_MAX = 40;
+
+// Các công cụ hình vẽ nằm chung trong nút "Khung ▾" — cùng một việc (vẽ hình lên ảnh) nên
+// gom lại, thay vì xếp bốn nút cạnh nhau làm hàng công cụ dài ra.
+const SHAPE_TOOLS: { tool: Tool; icon: string; label: string }[] = [
+  { tool: "box", icon: "▭", label: "Khung" },
+  { tool: "ellipse", icon: "◯", label: "Hình tròn" },
+  { tool: "line", icon: "╱", label: "Đường thẳng" },
+  { tool: "pen", icon: "✎", label: "Bút" },
+];
 
 interface Props {
   tool: Tool;
@@ -27,6 +41,10 @@ interface Props {
   title: string;
   setTitle: (t: string) => void;
   onScanQr: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
   highlightColor: string;
   setHighlightColor: (c: string) => void;
   highlightThickness: number;
@@ -38,42 +56,188 @@ interface Props {
   showHighlightOptions: boolean;
   /** Đang chỉnh vệt đã tô (không phải đặt mặc định cho vệt sắp tô) */
   editingSelected: boolean;
+  /** Số sẽ đóng cho mốc Bước kế tiếp */
+  stepNext: number;
+  setStepNext: (n: number) => void;
+  stepWithText: boolean;
+  setStepWithText: (v: boolean) => void;
+  blurStrength: number;
+  setBlurStrength: (n: number) => void;
+  /** Mã hex vừa hút được (null = chưa hút lần nào) */
+  pickedColor: string | null;
+  /** Số đo của thước đang chọn (null = chưa đo/chưa chọn cái nào) */
+  measureReadout: {
+    w: number;
+    h: number;
+    dist: number;
+    from: { x: number; y: number };
+    to: { x: number; y: number };
+  } | null;
+}
+
+// ①②③… tới ⑳; quá 20 thì hiện số thường.
+function circled(n: number): string {
+  return n >= 1 && n <= 20 ? String.fromCharCode(0x245f + n) : String(n);
+}
+
+/** Đóng menu khi bấm ra ngoài hoặc nhấn Esc — thiếu cái này menu treo lại rất khó chịu. */
+function useDismiss(open: boolean, close: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation(); // đừng để Esc thoát luôn trình sửa
+        close();
+      }
+    };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDown);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open, close]);
+  return ref;
 }
 
 export function Toolbar(props: Props) {
   const {
     tool, setTool, onDelete, canDelete, onBack, onSave, saving, title, setTitle, onScanQr,
+    onUndo, onRedo, canUndo, canRedo,
     highlightColor, setHighlightColor, highlightThickness, setHighlightThickness,
     highlightOpacity, setHighlightOpacity, showHighlightOptions, editingSelected,
+    stepNext, setStepNext, stepWithText, setStepWithText, measureReadout,
+    blurStrength, setBlurStrength, pickedColor,
   } = props;
+
+  const [shapesOpen, setShapesOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  // Hình vẽ dùng gần nhất — bấm vào phần thân nút là dùng lại ngay, không phải mở menu.
+  const [lastShape, setLastShape] = useState<Tool>("box");
+
+  const shapesRef = useDismiss(shapesOpen, () => setShapesOpen(false));
+  const moreRef = useDismiss(moreOpen, () => setMoreOpen(false));
+
+  const shapeActive = SHAPE_TOOLS.some((s) => s.tool === tool);
+  const current = SHAPE_TOOLS.find((s) => s.tool === (shapeActive ? tool : lastShape)) ?? SHAPE_TOOLS[0];
   const opacityPct = Math.round(highlightOpacity * 100);
+
+  function pickShape(t: Tool) {
+    setLastShape(t);
+    setTool(t);
+    setShapesOpen(false);
+  }
+
+  function runMore(fn: () => void) {
+    setMoreOpen(false);
+    fn();
+  }
+
   return (
     <>
       <div className="toolbar">
-        <button className={tool === "select" ? "active" : ""} onClick={() => setTool("select")}>
-          ↖ Chọn
+        <button className={tool === "select" ? "active" : ""} onClick={() => setTool("select")} title="Chọn / di chuyển phần tử">
+          ↖ <span className="tb-txt">Chọn</span>
         </button>
-        <button className={tool === "box" ? "active" : ""} onClick={() => setTool("box")}>
-          ▭ Khung
+
+        {/* Nút ghép: thân = dùng lại hình vừa chọn, mũi ▾ = mở danh sách hình */}
+        <div className="tb-split" ref={shapesRef}>
+          <button
+            className={"tb-split-main" + (shapeActive ? " active" : "")}
+            onClick={() => setTool(current.tool)}
+            title={`${current.label} — bấm ▾ để đổi hình`}
+          >
+            {current.icon} <span className="tb-txt">{current.label}</span>
+          </button>
+          <button
+            className={"tb-split-caret" + (shapeActive ? " active" : "")}
+            onClick={() => setShapesOpen((v) => !v)}
+            aria-label="Chọn hình khác"
+          >
+            ▾
+          </button>
+          {shapesOpen && (
+            <div className="tb-menu">
+              {SHAPE_TOOLS.map((s) => (
+                <button
+                  key={s.tool}
+                  className={tool === s.tool ? "active" : ""}
+                  onClick={() => pickShape(s.tool)}
+                >
+                  <span className="tb-menu-ico">{s.icon}</span>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <button className={tool === "arrow" ? "active" : ""} onClick={() => setTool("arrow")} title="Mũi tên — kéo để vẽ">
+          → <span className="tb-txt">Mũi tên</span>
         </button>
-        <button className={tool === "highlight" ? "active" : ""} onClick={() => setTool("highlight")}>
-          <span className="hl-swatch" style={{ background: highlightColor }} /> Tô sáng
+        <button className={tool === "step" ? "active" : ""} onClick={() => setTool("step")} title="Bước — bấm liên tiếp để đặt ①②③…">
+          {circled(stepNext)} <span className="tb-txt">Bước</span>
         </button>
-        <button className={tool === "arrow" ? "active" : ""} onClick={() => setTool("arrow")}>
-          → Mũi tên
+        <button className={tool === "note" ? "active" : ""} onClick={() => setTool("note")} title="Ghi chú — bấm để thêm chữ">
+          🏷 <span className="tb-txt">Ghi chú</span>
         </button>
-        <button className={tool === "step" ? "active" : ""} onClick={() => setTool("step")}>
-          ① Bước
+        <button className={tool === "highlight" ? "active" : ""} onClick={() => setTool("highlight")} title="Tô sáng — kéo ngang qua dòng chữ">
+          <span className="hl-swatch" style={{ background: highlightColor }} /> <span className="tb-txt">Tô sáng</span>
         </button>
-        <button className={tool === "note" ? "active" : ""} onClick={() => setTool("note")}>
-          🏷 Ghi chú
+        <button
+          className={tool === "blur" ? "active" : ""}
+          onClick={() => setTool("blur")}
+          title="Che mờ vùng chứa thông tin riêng (email, số điện thoại, số tài khoản…)"
+        >
+          ▨ <span className="tb-txt">Che mờ</span>
         </button>
-        <button onClick={onDelete} disabled={!canDelete}>
-          🗑 Xoá
+        <button onClick={onDelete} disabled={!canDelete} title="Xoá phần tử đang chọn (Delete)">
+          🗑 <span className="tb-txt">Xoá</span>
         </button>
         <button onClick={onScanQr} title="Quét mã QR trong ảnh">
-          ▦ QR
+          ▦ <span className="tb-txt">QR</span>
         </button>
+
+        {/* Menu việc lẻ: không phải công cụ vẽ nên không cần chỗ cố định trên hàng chính */}
+        <div className="tb-split" ref={moreRef}>
+          <button
+            className={"tb-more" + (moreOpen ? " active" : "")}
+            onClick={() => setMoreOpen((v) => !v)}
+            title="Thêm"
+          >
+            ⋮ <span className="tb-txt">Thêm</span>
+          </button>
+          {moreOpen && (
+            <div className="tb-menu tb-menu--wide">
+              <button onClick={() => runMore(onUndo)} disabled={!canUndo}>
+                <span className="tb-menu-ico">↶</span> Hoàn tác
+                <span className="tb-menu-key">Ctrl+Z</span>
+              </button>
+              <button onClick={() => runMore(onRedo)} disabled={!canRedo}>
+                <span className="tb-menu-ico">↷</span> Làm lại
+                <span className="tb-menu-key">Ctrl+Y</span>
+              </button>
+              <div className="tb-menu-sep" />
+              <button
+                className={tool === "measure" ? "active" : ""}
+                onClick={() => runMore(() => setTool("measure"))}
+              >
+                <span className="tb-menu-ico">↔</span> Đo kích thước
+              </button>
+              <button
+                className={tool === "eyedrop" ? "active" : ""}
+                onClick={() => runMore(() => setTool("eyedrop"))}
+              >
+                <span className="tb-menu-ico">🎨</span> Hút màu
+              </button>
+            </div>
+          )}
+        </div>
+
         <span style={{ flex: 1 }} />
         <input
           className="title-input"
@@ -82,11 +246,120 @@ export function Toolbar(props: Props) {
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
-        <button onClick={onBack}>← Quay lại</button>
+        <button onClick={onBack} title="Quay lại (Esc)">← <span className="tb-txt">Quay lại</span></button>
         <button className="primary" onClick={onSave} disabled={saving}>
           {saving ? "Đang lưu…" : "💾 Lưu"}
         </button>
       </div>
+
+      {/* Hiện cả khi đang ở công cụ Chọn mà bấm vào một thước — để xem lại số đã đo */}
+      {(tool === "measure" || measureReadout) && (
+        <div className="toolbar toolbar--sub">
+          {measureReadout ? (
+            <>
+              <span className="tb-label">Rộng</span>
+              <span className="tb-num">{measureReadout.w} px</span>
+              <span className="tb-sep" />
+              <span className="tb-label">Cao</span>
+              <span className="tb-num">{measureReadout.h} px</span>
+              <span className="tb-sep" />
+              <span className="tb-label">Khoảng cách</span>
+              <span className="tb-num">{measureReadout.dist} px</span>
+              <span className="tb-sep" />
+              <span className="tb-label">Toạ độ</span>
+              <span className="tb-num">
+                ({measureReadout.from.x}, {measureReadout.from.y}) → ({measureReadout.to.x}, {measureReadout.to.y})
+              </span>
+            </>
+          ) : (
+            <span className="tb-hint">Kéo từ A sang B để đo. Giữ <b>Shift</b> để khoá ngang/dọc. Số tính theo pixel ảnh gốc.</span>
+          )}
+        </div>
+      )}
+
+      {tool === "step" && (
+        <div className="toolbar toolbar--sub">
+          <span className="tb-label">Số tiếp theo</span>
+          <span className="step-preview">{circled(stepNext)}</span>
+          <input
+            type="number"
+            className="step-input"
+            min={1}
+            max={99}
+            value={stepNext}
+            onChange={(e) => {
+              const n = Math.floor(Number(e.target.value));
+              if (Number.isFinite(n) && n >= 1 && n <= 99) setStepNext(n);
+            }}
+          />
+          <button className="tb-mini" onClick={() => setStepNext(1)} disabled={stepNext === 1}>
+            Đánh lại từ ①
+          </button>
+          <span className="tb-sep" />
+          <label className="tb-check">
+            <input
+              type="checkbox"
+              checked={stepWithText}
+              onChange={(e) => setStepWithText(e.target.checked)}
+            />
+            Nhập chữ ngay khi đặt
+          </label>
+          <span className="tb-sep" />
+          <span className="tb-hint">
+            {stepWithText
+              ? "Bấm lên ảnh → gõ nội dung → Ctrl+Enter, rồi bấm chỗ tiếp theo"
+              : "Bấm liên tiếp để đặt ①②③… · bấm đúp vào mốc để thêm chữ"}
+          </span>
+        </div>
+      )}
+
+      {(tool === "pen" || tool === "ellipse" || tool === "line") && (
+        <div className="toolbar toolbar--sub">
+          <span className="tb-hint">
+            {tool === "pen"
+              ? "Kéo để vẽ tay, vẽ được nhiều nét liền nhau"
+              : tool === "ellipse"
+                ? "Kéo để vẽ hình tròn. Giữ Shift để tròn đều"
+                : "Kéo để vẽ đường thẳng. Giữ Shift để khoá ngang/dọc"}
+          </span>
+        </div>
+      )}
+
+      {tool === "blur" && (
+        <div className="toolbar toolbar--sub">
+          <span className="tb-label">Độ mờ</span>
+          <input
+            type="range"
+            className="hl-range"
+            min={BLUR_MIN}
+            max={BLUR_MAX}
+            step={2}
+            value={blurStrength}
+            onChange={(e) => setBlurStrength(Number(e.target.value))}
+          />
+          <span className="tb-value">{blurStrength}</span>
+          <span className="tb-sep" />
+          <span className="tb-hint">
+            Kéo một vùng để che. Che nhiều chỗ liên tiếp được — ảnh chia sẻ sẽ mất hẳn pixel gốc ở vùng này.
+          </span>
+        </div>
+      )}
+
+      {tool === "eyedrop" && (
+        <div className="toolbar toolbar--sub">
+          {pickedColor ? (
+            <>
+              <span className="tb-label">Màu vừa hút</span>
+              <span className="hl-swatch hl-swatch--lg" style={{ background: pickedColor }} />
+              <span className="tb-num">{pickedColor.toUpperCase()}</span>
+              <span className="tb-sep" />
+              <span className="tb-hint">Đã copy vào clipboard · bấm chỗ khác để hút tiếp</span>
+            </>
+          ) : (
+            <span className="tb-hint">Bấm vào ảnh để lấy mã màu của pixel đó (đọc từ ảnh gốc, không tính chú thích vẽ đè)</span>
+          )}
+        </div>
+      )}
 
       {/* Hàng tuỳ chọn chỉ hiện khi đang cầm bút tô sáng hoặc đang chọn một vệt —
           không chiếm chỗ lúc dùng công cụ khác */}
