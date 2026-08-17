@@ -35,6 +35,8 @@ interface Props {
   setTool: (t: Tool) => void;
   onDelete: () => void;
   canDelete: boolean;
+  /** Số phần tử đang chọn — hiện lên nút Xoá để biết sắp xoá mấy cái */
+  deleteCount: number;
   onBack: () => void;
   onSave: () => void;
   saving: boolean;
@@ -106,7 +108,7 @@ function useDismiss(open: boolean, close: () => void) {
 
 export function Toolbar(props: Props) {
   const {
-    tool, setTool, onDelete, canDelete, onBack, onSave, saving, title, setTitle, onScanQr,
+    tool, setTool, onDelete, canDelete, deleteCount, onBack, onSave, saving, title, setTitle, onScanQr,
     onUndo, onRedo, canUndo, canRedo,
     highlightColor, setHighlightColor, highlightThickness, setHighlightThickness,
     highlightOpacity, setHighlightOpacity, showHighlightOptions, editingSelected,
@@ -126,6 +128,15 @@ export function Toolbar(props: Props) {
   const current = SHAPE_TOOLS.find((s) => s.tool === (shapeActive ? tool : lastShape)) ?? SHAPE_TOOLS[0];
   const opacityPct = Math.round(highlightOpacity * 100);
 
+  // Bấm lại vào công cụ ĐANG bật = tắt nó, trở về Chọn. Trước đây bấm lại không có tác dụng
+  // gì: muốn thôi vẽ phải nhớ bấm sang nút Chọn, không thì lỡ tay bấm lên ảnh là ra thêm
+  // một mốc/vệt nữa.
+  function toggleTool(t: Tool) {
+    setTool(tool === t ? "select" : t);
+  }
+
+  // Chọn hình từ menu ▾ thì LUÔN bật hình đó — đây là lựa chọn có chủ đích ("tôi muốn hình
+  // tròn"), không phải cú bấm lặp lại. Muốn tắt thì bấm vào thân nút, chỗ có toggle.
   function pickShape(t: Tool) {
     setLastShape(t);
     setTool(t);
@@ -148,8 +159,8 @@ export function Toolbar(props: Props) {
         <div className="tb-split" ref={shapesRef}>
           <button
             className={"tb-split-main" + (shapeActive ? " active" : "")}
-            onClick={() => setTool(current.tool)}
-            title={`${current.label} — bấm ▾ để đổi hình`}
+            onClick={() => toggleTool(current.tool)}
+            title={`${current.label} — bấm lại để tắt, bấm ▾ để đổi hình`}
           >
             {current.icon} <span className="tb-txt">{current.label}</span>
           </button>
@@ -176,27 +187,31 @@ export function Toolbar(props: Props) {
           )}
         </div>
 
-        <button className={tool === "arrow" ? "active" : ""} onClick={() => setTool("arrow")} title="Mũi tên — kéo để vẽ">
+        <button className={tool === "arrow" ? "active" : ""} onClick={() => toggleTool("arrow")} title="Mũi tên — kéo để vẽ, bấm lại để tắt">
           → <span className="tb-txt">Mũi tên</span>
         </button>
-        <button className={tool === "step" ? "active" : ""} onClick={() => setTool("step")} title="Bước — bấm liên tiếp để đặt ①②③…">
+        <button className={tool === "step" ? "active" : ""} onClick={() => toggleTool("step")} title="Bước — bấm liên tiếp để đặt ①②③…, bấm lại để tắt">
           {circled(stepNext)} <span className="tb-txt">Bước</span>
         </button>
-        <button className={tool === "note" ? "active" : ""} onClick={() => setTool("note")} title="Ghi chú — bấm để thêm chữ">
+        <button className={tool === "note" ? "active" : ""} onClick={() => toggleTool("note")} title="Ghi chú — bấm để thêm chữ, bấm lại để tắt">
           🏷 <span className="tb-txt">Ghi chú</span>
         </button>
-        <button className={tool === "highlight" ? "active" : ""} onClick={() => setTool("highlight")} title="Tô sáng — kéo ngang qua dòng chữ">
+        <button className={tool === "highlight" ? "active" : ""} onClick={() => toggleTool("highlight")} title="Tô sáng — kéo ngang qua dòng chữ, bấm lại để tắt">
           <span className="hl-swatch" style={{ background: highlightColor }} /> <span className="tb-txt">Tô sáng</span>
         </button>
         <button
           className={tool === "blur" ? "active" : ""}
-          onClick={() => setTool("blur")}
-          title="Che mờ vùng chứa thông tin riêng (email, số điện thoại, số tài khoản…)"
+          onClick={() => toggleTool("blur")}
+          title="Che mờ vùng chứa thông tin riêng (email, số điện thoại, số tài khoản…) — bấm lại để tắt"
         >
           ▨ <span className="tb-txt">Che mờ</span>
         </button>
-        <button onClick={onDelete} disabled={!canDelete} title="Xoá phần tử đang chọn (Delete)">
-          🗑 <span className="tb-txt">Xoá</span>
+        <button
+          onClick={onDelete}
+          disabled={!canDelete}
+          title="Xoá phần tử đang chọn (Delete) — kéo tô một vùng trống để chọn nhiều cái"
+        >
+          🗑 <span className="tb-txt">{deleteCount > 1 ? `Xoá (${deleteCount})` : "Xoá"}</span>
         </button>
         <button onClick={onScanQr} title="Quét mã QR trong ảnh">
           ▦ <span className="tb-txt">QR</span>
@@ -224,13 +239,13 @@ export function Toolbar(props: Props) {
               <div className="tb-menu-sep" />
               <button
                 className={tool === "measure" ? "active" : ""}
-                onClick={() => runMore(() => setTool("measure"))}
+                onClick={() => runMore(() => toggleTool("measure"))}
               >
                 <span className="tb-menu-ico">↔</span> Đo kích thước
               </button>
               <button
                 className={tool === "eyedrop" ? "active" : ""}
-                onClick={() => runMore(() => setTool("eyedrop"))}
+                onClick={() => runMore(() => toggleTool("eyedrop"))}
               >
                 <span className="tb-menu-ico">🎨</span> Hút màu
               </button>

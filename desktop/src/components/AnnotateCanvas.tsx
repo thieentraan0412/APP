@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Stage, Layer, Image as KImage, Rect, Text, Arrow as KArrow, Circle, Ellipse, Group, Line, Transformer } from "react-konva";
 // Nhập dạng GIÁ TRỊ (không phải `import type`) vì cần Konva.Filters.Blur cho vùng che mờ.
 import Konva from "konva";
@@ -41,8 +41,10 @@ interface Props {
   setSteps: React.Dispatch<React.SetStateAction<StepMarker[]>>;
   notes: Note[];
   setNotes: React.Dispatch<React.SetStateAction<Note[]>>;
-  selectedId: string | null;
-  setSelectedId: (id: string | null) => void;
+  /** Các phần tử đang chọn. Một cái = chỉnh sửa được (kéo, co giãn); nhiều cái = chọn để
+   *  xoá cả loạt bằng cách kéo tô một vùng trống. */
+  selectedIds: string[];
+  setSelectedIds: (ids: string[]) => void;
   stageRef: React.RefObject<Konva.Stage | null>;
 }
 
@@ -52,6 +54,10 @@ export const HIGHLIGHT_OPACITY = 0.38;
 // Chữ của mốc Bước đặt cách tâm vòng tròn ngần này pixel (bán kính vòng là 18) để không
 // đè lên con số.
 const STEP_TEXT_DX = 25;
+
+// Bán kính vòng tròn của mốc Bước. Dùng chung cho lúc vẽ và lúc tính vùng chọn — để rời
+// nhau thì kéo tô trúng vòng tròn mà không chọn được.
+const STEP_RADIUS = 18;
 
 // Kéo dọc phải vượt mép dải THÊM ngần này pixel mới coi là muốn tô cả khối. Trước đây
 // ngưỡng lấy đúng bằng độ dày: đặt bút mảnh 8px thì tay rung hơn 8px là đã nhảy sang tô
@@ -105,6 +111,44 @@ export function measureInfo(m: Measure, scale: number) {
 export function toImagePoint(x: number, y: number, scale: number) {
   const s = scale > 0 ? scale : 1;
   return { x: Math.round(x / s), y: Math.round(y / s) };
+}
+
+// ── Khung bao của phần tử (để biết nó có nằm trong vùng kéo tô hay không) ──
+// Tính thẳng từ dữ liệu chứ không hỏi Konva `getClientRect`: khỏi lệ thuộc bóng đổ, độ dày
+// nét, và khỏi cần node đã vẽ xong. Phép kiểm tra là GIAO NHAU (không đòi bao trọn), nên
+// quét chổi qua là dính — sai lệch vài pixel ở ước lượng chữ không thành vấn đề.
+export interface Bounds { x: number; y: number; w: number; h: number }
+
+function spanBounds(x1: number, y1: number, x2: number, y2: number): Bounds {
+  return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+}
+
+// Konva.Text không cho biết kích thước trước khi vẽ → ước lượng theo cỡ chữ 18 đậm.
+function noteBounds(n: Note): Bounds {
+  const lines = (n.text || "").split("\n");
+  const longest = lines.reduce((m, l) => Math.max(m, l.length), 0);
+  return { x: n.x, y: n.y, w: Math.max(12, longest * 9.5), h: Math.max(18, lines.length * 22) };
+}
+
+function shapeBounds(s: Shape): Bounds {
+  if (s.kind === "line") return spanBounds(s.x1, s.y1, s.x2, s.y2);
+  if (s.kind === "pen") {
+    if (s.points.length < 2) return { x: 0, y: 0, w: 0, h: 0 };
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i + 1 < s.points.length; i += 2) {
+      const px = s.points[i], py = s.points[i + 1];
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+    }
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }
+  return { x: s.x, y: s.y, w: s.w, h: s.h }; // ellipse | blur
+}
+
+function overlaps(a: Bounds, b: Bounds): boolean {
+  return a.x <= b.x + b.w && a.x + a.w >= b.x && a.y <= b.y + b.h && a.y + a.h >= b.y;
 }
 
 // Chữ đi kèm mốc Bước. Tự bọc dòng trong khoảng trống còn lại, và nhảy sang bên trái khi
@@ -257,10 +301,21 @@ export function AnnotateCanvas(props: Props) {
     stepNext, setStepNext, stepWithText, blurStrength, onPickColor,
     shapes, setShapes, measures, setMeasures, scale,
     highlightColor, highlightThickness, highlightOpacity, highlights, setHighlights,
-    boxes, setBoxes, arrows, setArrows, steps, setSteps, notes, setNotes, selectedId, setSelectedId, stageRef,
+    boxes, setBoxes, arrows, setArrows, steps, setSteps, notes, setNotes, selectedIds, setSelectedIds, stageRef,
   } = props;
 
+  // Chỉnh sửa (kéo, co giãn, đổi màu vệt tô, đọc số đo) chỉ có nghĩa khi đúng MỘT phần tử
+  // đang chọn — nên phần lớn code bên dưới vẫn hỏi `selectedId` như trước, còn chọn nhiều
+  // chỉ phục vụ việc xoá cả loạt.
+  const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const setSelectedId = (id: string | null) => setSelectedIds(id ? [id] : []);
+
   const trRef = useRef<Konva.Transformer>(null);
+  // Kéo tô một vùng trống để chọn nhiều phần tử. `rect` giữ trong ref (không chỉ trong
+  // state) để lúc thả chuột đọc được vùng mới nhất, khỏi phụ thuộc React đã render kịp chưa.
+  const marquee = useRef<{ sx: number; sy: number; moved: boolean; rect: Bounds } | null>(null);
+  const [marqueeRect, setMarqueeRect] = useState<Bounds | null>(null);
   const boxRefs = useRef<Map<string, Konva.Rect>>(new Map());
   const drawing = useRef<{ id: string; sx: number; sy: number } | null>(null);
   const arrowDrawing = useRef<{ id: string } | null>(null);
@@ -345,6 +400,44 @@ export function AnnotateCanvas(props: Props) {
     tr.nodes(node ? [node] : []);
     tr.getLayer()?.batchDraw();
   }, [selectedId, boxes, highlights]);
+
+  // Chốt vùng kéo tô ở cấp CỬA SỔ, không phải trên Stage: Konva chỉ báo mouseup khi nhả
+  // chuột bên trong ảnh, mà quét chọn thì rất hay kéo lố ra mép rồi mới nhả. Nghe trên
+  // stage thôi là vùng chọn không bao giờ được chốt — khung nét đứt dính lại trên ảnh và
+  // cả lượt chọn đó mất trắng.
+  // Không đặt mảng phụ thuộc: hàm đăng ký lại mỗi lần render nên luôn nhìn thấy danh sách
+  // phần tử mới nhất.
+  useEffect(() => {
+    const onUp = () => {
+      if (!marquee.current) return;
+      const { moved, rect } = marquee.current;
+      marquee.current = null;
+      setMarqueeRect(null);
+      // Bấm nhả tại chỗ (không kéo) = chỉ bỏ chọn, đã làm lúc nhấn xuống.
+      if (moved) {
+        setSelectedIds(allBounds().filter(({ b }) => overlaps(b, rect)).map(({ id }) => id));
+      }
+    };
+    window.addEventListener("mouseup", onUp);
+    return () => window.removeEventListener("mouseup", onUp);
+  });
+
+  /** Khung bao của MỌI phần tử đang có trên ảnh, kèm id — dùng cho vùng kéo tô và cho
+   *  viền báo hiệu khi đang chọn nhiều. */
+  function allBounds(): { id: string; b: Bounds }[] {
+    return [
+      ...boxes.map((b) => ({ id: b.id, b: { x: b.x, y: b.y, w: b.w, h: b.h } })),
+      ...highlights.map((h) => ({ id: h.id, b: { x: h.x, y: h.y, w: h.w, h: h.h } })),
+      ...shapes.map((s) => ({ id: s.id, b: shapeBounds(s) })),
+      ...arrows.map((a) => ({ id: a.id, b: spanBounds(a.x1, a.y1, a.x2, a.y2) })),
+      ...measures.map((m) => ({ id: m.id, b: spanBounds(m.x1, m.y1, m.x2, m.y2) })),
+      ...steps.map((s) => ({
+        id: s.id,
+        b: { x: s.x - STEP_RADIUS, y: s.y - STEP_RADIUS, w: STEP_RADIUS * 2, h: STEP_RADIUS * 2 },
+      })),
+      ...notes.map((n) => ({ id: n.id, b: noteBounds(n) })),
+    ];
+  }
 
   function onMouseDown(e: Konva.KonvaEventObject<MouseEvent>) {
     const stage = e.target.getStage();
@@ -442,9 +535,12 @@ export function AnnotateCanvas(props: Props) {
       return;
     }
 
-    // select: bấm nền trống → bỏ chọn
+    // select: bấm nền trống → bỏ chọn, đồng thời mở vùng kéo tô. Bấm nhả tại chỗ thì chỉ là
+    // bỏ chọn như trước; kéo đi thì quét được nhiều phần tử một lượt để xoá cả loạt.
     if (e.target === stage || e.target.name() === "bg") {
-      setSelectedId(null);
+      marquee.current = { sx: pos.x, sy: pos.y, moved: false, rect: { x: pos.x, y: pos.y, w: 0, h: 0 } };
+      setMarqueeRect(null);
+      setSelectedIds([]);
     }
   }
 
@@ -452,6 +548,17 @@ export function AnnotateCanvas(props: Props) {
     const stage = e.target.getStage();
     const pos = stage?.getPointerPosition();
     if (!pos) return;
+
+    // Đang kéo tô chọn vùng: không có nét vẽ nào chạy song song nên xử lý xong là thoát.
+    // Ngưỡng 3px để rung tay lúc bấm bỏ chọn không biến thành một vùng chọn tí hon.
+    if (marquee.current) {
+      const { sx, sy } = marquee.current;
+      if (!marquee.current.moved && Math.hypot(pos.x - sx, pos.y - sy) > 3) marquee.current.moved = true;
+      const rect = spanBounds(sx, sy, pos.x, pos.y);
+      marquee.current.rect = rect;
+      if (marquee.current.moved) setMarqueeRect(rect);
+      return;
+    }
 
     if (drawing.current) {
       const { id, sx, sy } = drawing.current;
@@ -876,7 +983,7 @@ export function AnnotateCanvas(props: Props) {
             }}
           >
             <Circle
-              radius={18}
+              radius={STEP_RADIUS}
               fill={s.color}
               stroke="white"
               strokeWidth={s.id === selectedId ? 3 : 0}
@@ -943,6 +1050,44 @@ export function AnnotateCanvas(props: Props) {
             onSelect={() => setSelectedId(m.id)}
           />
         ))}
+
+        {/* Viền báo hiệu khi đang chọn NHIỀU phần tử. Lúc chọn một cái thì mỗi loại phần tử
+            đã có cách tự làm nổi riêng (Transformer, nét đậm hơn…) nên không vẽ chồng.
+            name="ui-overlay" để lúc xuất ảnh ẩn đi — xem buildFlattenedPng. */}
+        {selectedIds.length > 1 &&
+          allBounds()
+            .filter(({ id }) => selectedSet.has(id))
+            .map(({ id, b }) => (
+              <Rect
+                key={`sel-${id}`}
+                name="ui-overlay"
+                x={b.x - 3}
+                y={b.y - 3}
+                width={b.w + 6}
+                height={b.h + 6}
+                stroke="#0b63f6"
+                strokeWidth={1.5}
+                dash={[5, 3]}
+                strokeScaleEnabled={false}
+                listening={false}
+              />
+            ))}
+
+        {marqueeRect && (
+          <Rect
+            name="ui-overlay"
+            x={marqueeRect.x}
+            y={marqueeRect.y}
+            width={marqueeRect.w}
+            height={marqueeRect.h}
+            fill="rgba(11,99,246,0.12)"
+            stroke="#0b63f6"
+            strokeWidth={1}
+            dash={[4, 3]}
+            strokeScaleEnabled={false}
+            listening={false}
+          />
+        )}
 
         <Transformer
           ref={trRef}

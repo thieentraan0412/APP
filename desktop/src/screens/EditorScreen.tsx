@@ -54,7 +54,12 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const [blurStrength, setBlurStrength] = useState(DEFAULT_BLUR);
   // Màu vừa hút (hex) — hiện trên thanh công cụ và đã copy vào clipboard.
   const [pickedColor, setPickedColor] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Danh sách phần tử đang chọn. Kéo tô một vùng trống trên ảnh chọn được nhiều cái để xoá
+  // cả loạt. Các thao tác chỉnh MỘT phần tử (co giãn, đổi màu vệt tô, đọc số đo, copy) chỉ
+  // có nghĩa khi đúng một cái đang chọn — nên selectedId suy ra từ đây, không giữ state riêng
+  // (hai nguồn sự thật thì sớm muộn cũng lệch nhau).
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
   const [saving, setSaving] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
   const [title, setTitle] = useState(initialTitle ?? "");
@@ -162,6 +167,13 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       if (inField) return;
 
       if (e.key === "Escape") {
+        // Đang chọn dở (nhất là vừa kéo tô trúng cả chục phần tử) thì Esc bỏ chọn trước.
+        // Thoát hẳn trình sửa là việc của lần nhấn sau — nếu không, lỡ tay Esc là mất luôn
+        // ảnh đang chú thích.
+        if (selectedIds.length > 0) {
+          setSelectedIds([]);
+          return;
+        }
         onBack();
         return;
       }
@@ -228,10 +240,10 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         } else if (clip.kind === "measure") {
           setMeasures((prev) => [...prev, { ...clip.data, id: newId, x1: clip.data.x1 + D, y1: clip.data.y1 + D, x2: clip.data.x2 + D, y2: clip.data.y2 + D }]);
         }
-        setSelectedId(newId);
+        setSelectedIds([newId]);
         return;
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && selectedId) {
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedIds.length > 0) {
         deleteSelected();
       }
     };
@@ -389,15 +401,16 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   }
 
   function deleteSelected() {
-    if (!selectedId) return;
-    setBoxes((prev) => prev.filter((b) => b.id !== selectedId));
-    setArrows((prev) => prev.filter((a) => a.id !== selectedId));
-    setSteps((prev) => prev.filter((st) => st.id !== selectedId));
-    setNotes((prev) => prev.filter((n) => n.id !== selectedId));
-    setHighlights((prev) => prev.filter((h) => h.id !== selectedId));
-    setMeasures((prev) => prev.filter((m) => m.id !== selectedId));
-    setShapes((prev) => prev.filter((s) => s.id !== selectedId));
-    setSelectedId(null);
+    if (selectedIds.length === 0) return;
+    const gone = new Set(selectedIds);
+    setBoxes((prev) => prev.filter((b) => !gone.has(b.id)));
+    setArrows((prev) => prev.filter((a) => !gone.has(a.id)));
+    setSteps((prev) => prev.filter((st) => !gone.has(st.id)));
+    setNotes((prev) => prev.filter((n) => !gone.has(n.id)));
+    setHighlights((prev) => prev.filter((h) => !gone.has(h.id)));
+    setMeasures((prev) => prev.filter((m) => !gone.has(m.id)));
+    setShapes((prev) => prev.filter((s) => !gone.has(s.id)));
+    setSelectedIds([]);
   }
 
   // ── Undo/Redo helpers ──────────────────────────────────────
@@ -450,7 +463,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     setMeasures(snap.measures.map((x) => ({ ...x })));
     setShapes(snap.shapes.map((x) => ({ ...x })));
     setStepNext(snap.stepNext);
-    setSelectedId(null);
+    setSelectedIds([]);
   }
   function undo() {
     flushRecord();
@@ -475,19 +488,21 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     if (!stage || !img) return null;
     const tr = stage.findOne("Transformer") as Konva.Transformer | undefined;
     const trVisible = tr?.visible() ?? false;
-    if (tr && trVisible) {
-      tr.visible(false);
-      tr.getLayer()?.batchDraw();
-    }
+    if (tr && trVisible) tr.visible(false);
+    // Viền chọn nhiều + khung kéo tô: chỉ là chỉ dẫn trên màn hình, không phải chú thích.
+    // Hàm này KHÔNG bỏ chọn (copy ảnh giữa chừng vẫn giữ nguyên phần tử đang chọn), nên
+    // phải tự ẩn — thiếu bước này thì ảnh copy dính mấy nét đứt màu xanh.
+    const overlays = Array.from(stage.find(".ui-overlay"));
+    overlays.forEach((n) => n.visible(false));
+    if (tr || overlays.length) stage.getLayers().forEach((l) => l.batchDraw());
     try {
       const pixelRatio = 1 / fit.scale; // xuất đúng độ phân giải gốc
       const dataUrl = stage.toDataURL({ mimeType: "image/png", pixelRatio });
       return dataUrlToBlob(dataUrl);
     } finally {
-      if (tr && trVisible) {
-        tr.visible(true);
-        tr.getLayer()?.batchDraw();
-      }
+      if (tr && trVisible) tr.visible(true);
+      overlays.forEach((n) => n.visible(true));
+      if (tr || overlays.length) stage.getLayers().forEach((l) => l.batchDraw());
     }
   }
 
@@ -545,8 +560,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     // khỏi ảnh xuất và mất chữ vừa gõ.
     (document.activeElement as HTMLElement | null)?.blur();
     setSaving(true);
-    // Bỏ chọn để Transformer không bị vẽ vào ảnh xuất ra
-    setSelectedId(null);
+    // Bỏ chọn để Transformer và viền chọn nhiều không bị vẽ vào ảnh xuất ra
+    setSelectedIds([]);
     // Chờ 2 frame: đủ để state (note vừa commit + bỏ chọn) áp dụng và Konva vẽ lại.
     await new Promise((r) => requestAnimationFrame(() => r(null)));
     await new Promise((r) => requestAnimationFrame(() => r(null)));
@@ -642,7 +657,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         tool={tool}
         setTool={setTool}
         onDelete={deleteSelected}
-        canDelete={!!selectedId}
+        canDelete={selectedIds.length > 0}
+        deleteCount={selectedIds.length}
         onBack={onBack}
         onSave={handleSave}
         saving={saving}
@@ -702,15 +718,15 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
             setSteps={setSteps}
             notes={notes}
             setNotes={setNotes}
-            selectedId={selectedId}
-            setSelectedId={setSelectedId}
+            selectedIds={selectedIds}
+            setSelectedIds={setSelectedIds}
             stageRef={stageRef}
           />
         )}
       </div>
       <p className="hint editor-hint">
         Mẹo: <b>Khung ▾</b> đổi giữa khung, hình tròn, đường thẳng và bút vẽ tay · <b>Tô sáng</b> kéo ngang qua dòng chữ · <b>Bước</b> bấm liên tiếp để đặt ①②③… · <b>Ghi chú</b> bấm để thêm chữ (đúp để sửa) · <b>⋮ Thêm</b> có hoàn tác, làm lại và đo kích thước.
-        Chọn phần tử rồi nhấn <b>Delete</b> để xoá.
+        Xoá: bấm vào phần tử rồi nhấn <b>Delete</b>. Xoá nhiều cùng lúc: dùng <b>↖ Chọn</b>, <b>kéo tô một vùng trống</b> quanh chúng rồi nhấn <b>Delete</b> (Esc để bỏ chọn).
       </p>
     </div>
   );
