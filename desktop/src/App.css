@@ -587,6 +587,15 @@ kbd {
 .toolbar button {
   white-space: nowrap;
   flex-shrink: 0;
+  /* Icon là SVG nên phải canh giữa theo chiều dọc với nhãn chữ. Khoảng cách để cho `gap`
+     lo, không viết dấu cách trong JSX: khi nhãn bị ẩn ở màn hẹp thì `gap` tự biến mất,
+     còn dấu cách thì vẫn nằm đó làm nút icon lệch sang trái. */
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.toolbar button > svg {
+  flex-shrink: 0;
 }
 /* Ô tiêu đề là thứ duy nhất được co lại — nó không bắt buộc, còn Quay lại/Lưu thì phải
    luôn nhìn thấy và bấm được. Trước đây ô này giữ nguyên 260px nên đẩy hai nút đó ra
@@ -661,9 +670,7 @@ kbd {
   opacity: 0.45;
   cursor: default;
 }
-.tb-menu-ico {
-  width: 17px;
-  text-align: center;
+.tb-menu button > svg {
   flex-shrink: 0;
 }
 /* Phím tắt đẩy sang phải, chữ nhạt — nhắc chứ không tranh chỗ với tên lệnh */

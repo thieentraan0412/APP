@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import type { ComponentType } from "react";
 import type { Tool } from "../types";
+import {
+  IconArrow, IconBlur, IconBox, IconCaret, IconEllipse, IconEyedrop, IconHighlight,
+  IconLine, IconMeasure, IconMore, IconNote, IconPen, IconQr, IconRedo, IconSelect,
+  IconStep, IconTrash, IconUndo,
+} from "./icons";
 
 // Bảng màu bút tô sáng. Vàng đứng đầu vì đó là màu mặc định quen thuộc của bút dạ quang.
 export const HIGHLIGHT_COLORS = [
@@ -23,12 +29,29 @@ export const BLUR_MAX = 40;
 
 // Các công cụ hình vẽ nằm chung trong nút "Khung ▾" — cùng một việc (vẽ hình lên ảnh) nên
 // gom lại, thay vì xếp bốn nút cạnh nhau làm hàng công cụ dài ra.
-const SHAPE_TOOLS: { tool: Tool; icon: string; label: string }[] = [
-  { tool: "box", icon: "▭", label: "Khung" },
-  { tool: "ellipse", icon: "◯", label: "Hình tròn" },
-  { tool: "line", icon: "╱", label: "Đường thẳng" },
-  { tool: "pen", icon: "✎", label: "Bút" },
+const SHAPE_TOOLS: { tool: Tool; Icon: ComponentType; label: string }[] = [
+  { tool: "box", Icon: IconBox, label: "Khung" },
+  { tool: "ellipse", Icon: IconEllipse, label: "Hình tròn" },
+  { tool: "line", Icon: IconLine, label: "Đường thẳng" },
+  { tool: "pen", Icon: IconPen, label: "Bút" },
 ];
+
+// Dưới ngưỡng này App.css đã ẩn nhãn chữ của nút — cũng là lúc hàng công cụ hết rộng rãi,
+// nên Che mờ và QR (không dùng liên tục như bút vẽ) rút xuống menu ⋮ thay vì chen tiếp.
+// Phải làm bằng JS chứ không phải CSS: hai nút đổi CHỖ trong cây DOM chứ không chỉ đổi
+// cách hiện, mà CSS thì không di chuyển được phần tử sang menu khác.
+const COMPACT_QUERY = "(max-width: 1180px)";
+
+function useCompact() {
+  const [compact, setCompact] = useState(() => window.matchMedia(COMPACT_QUERY).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(COMPACT_QUERY);
+    const onChange = () => setCompact(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return compact;
+}
 
 interface Props {
   tool: Tool;
@@ -116,6 +139,7 @@ export function Toolbar(props: Props) {
     blurStrength, setBlurStrength, pickedColor,
   } = props;
 
+  const compact = useCompact();
   const [shapesOpen, setShapesOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   // Hình vẽ dùng gần nhất — bấm vào phần thân nút là dùng lại ngay, không phải mở menu.
@@ -127,6 +151,8 @@ export function Toolbar(props: Props) {
   const shapeActive = SHAPE_TOOLS.some((s) => s.tool === tool);
   const current = SHAPE_TOOLS.find((s) => s.tool === (shapeActive ? tool : lastShape)) ?? SHAPE_TOOLS[0];
   const opacityPct = Math.round(highlightOpacity * 100);
+  const hiddenToolActive =
+    tool === "measure" || tool === "eyedrop" || (compact && tool === "blur");
 
   // Bấm lại vào công cụ ĐANG bật = tắt nó, trở về Chọn. Trước đây bấm lại không có tác dụng
   // gì: muốn thôi vẽ phải nhớ bấm sang nút Chọn, không thì lỡ tay bấm lên ảnh là ra thêm
@@ -152,7 +178,8 @@ export function Toolbar(props: Props) {
     <>
       <div className="toolbar">
         <button className={tool === "select" ? "active" : ""} onClick={() => setTool("select")} title="Chọn / di chuyển phần tử">
-          ↖ <span className="tb-txt">Chọn</span>
+          <IconSelect />
+          <span className="tb-txt">Chọn</span>
         </button>
 
         {/* Nút ghép: thân = dùng lại hình vừa chọn, mũi ▾ = mở danh sách hình */}
@@ -162,14 +189,15 @@ export function Toolbar(props: Props) {
             onClick={() => toggleTool(current.tool)}
             title={`${current.label} — bấm lại để tắt, bấm ▾ để đổi hình`}
           >
-            {current.icon} <span className="tb-txt">{current.label}</span>
+            <current.Icon />
+            <span className="tb-txt">{current.label}</span>
           </button>
           <button
             className={"tb-split-caret" + (shapeActive ? " active" : "")}
             onClick={() => setShapesOpen((v) => !v)}
             aria-label="Chọn hình khác"
           >
-            ▾
+            <IconCaret />
           </button>
           {shapesOpen && (
             <div className="tb-menu">
@@ -179,7 +207,7 @@ export function Toolbar(props: Props) {
                   className={tool === s.tool ? "active" : ""}
                   onClick={() => pickShape(s.tool)}
                 >
-                  <span className="tb-menu-ico">{s.icon}</span>
+                  <s.Icon />
                   {s.label}
                 </button>
               ))}
@@ -188,66 +216,99 @@ export function Toolbar(props: Props) {
         </div>
 
         <button className={tool === "arrow" ? "active" : ""} onClick={() => toggleTool("arrow")} title="Mũi tên — kéo để vẽ, bấm lại để tắt">
-          → <span className="tb-txt">Mũi tên</span>
+          <IconArrow />
+          <span className="tb-txt">Mũi tên</span>
         </button>
         <button className={tool === "step" ? "active" : ""} onClick={() => toggleTool("step")} title="Bước — bấm liên tiếp để đặt ①②③…, bấm lại để tắt">
-          {circled(stepNext)} <span className="tb-txt">Bước</span>
+          <IconStep n={stepNext} />
+          <span className="tb-txt">Bước</span>
         </button>
         <button className={tool === "note" ? "active" : ""} onClick={() => toggleTool("note")} title="Ghi chú — bấm để thêm chữ, bấm lại để tắt">
-          🏷 <span className="tb-txt">Ghi chú</span>
+          <IconNote />
+          <span className="tb-txt">Ghi chú</span>
         </button>
         <button className={tool === "highlight" ? "active" : ""} onClick={() => toggleTool("highlight")} title="Tô sáng — kéo ngang qua dòng chữ, bấm lại để tắt">
-          <span className="hl-swatch" style={{ background: highlightColor }} /> <span className="tb-txt">Tô sáng</span>
+          <IconHighlight color={highlightColor} />
+          <span className="tb-txt">Tô sáng</span>
         </button>
-        <button
-          className={tool === "blur" ? "active" : ""}
-          onClick={() => toggleTool("blur")}
-          title="Che mờ vùng chứa thông tin riêng (email, số điện thoại, số tài khoản…) — bấm lại để tắt"
-        >
-          ▨ <span className="tb-txt">Che mờ</span>
-        </button>
+
+        {/* Cửa sổ hẹp: Che mờ và QR chuyển xuống menu ⋮ bên dưới, không mất đi đâu cả */}
+        {!compact && (
+          <button
+            className={tool === "blur" ? "active" : ""}
+            onClick={() => toggleTool("blur")}
+            title="Che mờ vùng chứa thông tin riêng (email, số điện thoại, số tài khoản…) — bấm lại để tắt"
+          >
+            <IconBlur />
+            <span className="tb-txt">Che mờ</span>
+          </button>
+        )}
         <button
           onClick={onDelete}
           disabled={!canDelete}
           title="Xoá phần tử đang chọn (Delete) — kéo tô một vùng trống để chọn nhiều cái"
         >
-          🗑 <span className="tb-txt">{deleteCount > 1 ? `Xoá (${deleteCount})` : "Xoá"}</span>
+          <IconTrash />
+          <span className="tb-txt">{deleteCount > 1 ? `Xoá (${deleteCount})` : "Xoá"}</span>
         </button>
-        <button onClick={onScanQr} title="Quét mã QR trong ảnh">
-          ▦ <span className="tb-txt">QR</span>
-        </button>
+        {!compact && (
+          <button onClick={onScanQr} title="Quét mã QR trong ảnh">
+            <IconQr />
+            <span className="tb-txt">QR</span>
+          </button>
+        )}
 
         {/* Menu việc lẻ: không phải công cụ vẽ nên không cần chỗ cố định trên hàng chính */}
         <div className="tb-split" ref={moreRef}>
           <button
-            className={"tb-more" + (moreOpen ? " active" : "")}
+            className={"tb-more" + (moreOpen || hiddenToolActive ? " active" : "")}
             onClick={() => setMoreOpen((v) => !v)}
             title="Thêm"
           >
-            ⋮ <span className="tb-txt">Thêm</span>
+            <IconMore />
+            <span className="tb-txt">Thêm</span>
           </button>
           {moreOpen && (
             <div className="tb-menu tb-menu--wide">
               <button onClick={() => runMore(onUndo)} disabled={!canUndo}>
-                <span className="tb-menu-ico">↶</span> Hoàn tác
+                <IconUndo />
+                Hoàn tác
                 <span className="tb-menu-key">Ctrl+Z</span>
               </button>
               <button onClick={() => runMore(onRedo)} disabled={!canRedo}>
-                <span className="tb-menu-ico">↷</span> Làm lại
+                <IconRedo />
+                Làm lại
                 <span className="tb-menu-key">Ctrl+Y</span>
               </button>
               <div className="tb-menu-sep" />
+              {compact && (
+                <>
+                  <button
+                    className={tool === "blur" ? "active" : ""}
+                    onClick={() => runMore(() => toggleTool("blur"))}
+                  >
+                    <IconBlur />
+                    Che mờ
+                  </button>
+                  <button onClick={() => runMore(onScanQr)}>
+                    <IconQr />
+                    Quét mã QR
+                  </button>
+                </>
+              )}
               <button
                 className={tool === "measure" ? "active" : ""}
                 onClick={() => runMore(() => toggleTool("measure"))}
               >
-                <span className="tb-menu-ico">↔</span> Đo kích thước
+                <IconMeasure />
+                Đo kích thước
               </button>
               <button
                 className={tool === "eyedrop" ? "active" : ""}
                 onClick={() => runMore(() => toggleTool("eyedrop"))}
               >
-                <span className="tb-menu-ico">🎨</span> Hút màu
+                <IconEyedrop />
+                Hút màu
               </button>
             </div>
           )}
