@@ -1,36 +1,74 @@
-# Chụp & chia sẻ (Capture & Share)
+# Chụp & Chia sẻ (Capture & Share)
 
-Ứng dụng desktop chụp ảnh / quay màn hình bằng **phím tắt toàn cục**, chỉnh sửa ảnh (kẻ khung + ghi chú), lưu lên **Cloudflare R2** và nhận **link chia sẻ ngay lập tức**.
+Ứng dụng desktop (Windows) chụp ảnh / quay màn hình bằng phím tắt, chú thích lên ảnh, rồi
+tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại: **0.5.1**.
 
-## Tính năng
-- 📸 Chụp toàn màn hình: `Ctrl + Shift + 1`
-- 🎥 Quay toàn màn hình (bật/tắt): `Ctrl + Shift + 2`
-- ✏️ Kẻ khung đánh dấu + ghi chú trên ảnh trước khi lưu
-- ☁️ Lưu lên Cloudflare R2 + metadata trong D1, trả link công khai
-- 🗂 Thư viện quản lý: xem / copy link / mở / **sửa annotate** / xoá, lọc theo thời gian & loại
-- 🔔 Chạy nền ở khay hệ thống (system tray)
+---
 
-## Công nghệ
-- **App desktop**: Tauri 2 (Rust) + React + TypeScript + Konva
-- **Chụp màn hình**: crate `xcap`; **Quay video**: `ffmpeg` (sidecar) + gdigrab
-- **Backend**: Cloudflare Workers + R2 (file) + D1 (metadata)
+## 1. Chụp & quay
 
-## Cấu trúc
-- `desktop/` — ứng dụng Tauri (frontend `src/`, Rust `src-tauri/`)
-- `worker/` — Cloudflare Worker (API)
-- `begin.md`, `implement.md`, `checklist.md` — mô tả / kế hoạch / tiến độ
+- Chụp toàn màn hình — `Ctrl + Shift + 1`
+- Chụp một vùng chọn — `Ctrl + Shift + 3`
+- Quay toàn màn hình (bấm lại để dừng) — `Ctrl + Shift + 2`
+- Quay theo vùng chọn — `Ctrl + Shift + 4`
+- Tạm dừng / quay tiếp khi đang quay — `Ctrl + Shift + H`
+- Viền nhấp nháy quanh vùng đang quay để biết chỗ nào đang được ghi
+- Cắt video (chọn đoạn cần giữ) trước khi lưu
+- Dán ảnh từ clipboard (Ctrl + V) vào thẳng trình chỉnh sửa
+- Đổi được mọi phím tắt trong phần Cài đặt
 
-## Thiết lập sau khi clone
-1. **ffmpeg sidecar** (không có trong repo do vượt 100MB): tải `ffmpeg.exe` rồi đặt vào
-   `desktop/src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe`
-2. Cài phụ thuộc:
-   ```bash
-   cd desktop && npm install
-   cd ../worker && npm install
-   ```
-3. Chạy app (dev): `cd desktop && npm run tauri dev`
-4. Deploy Worker: `cd worker && wrangler deploy`
+## 2. Chú thích ảnh
 
-## Yêu cầu
-- Node.js, Rust (toolchain MSVC), Visual Studio Build Tools (C++), ffmpeg
-- Tài khoản Cloudflare (R2 + D1)
+- Hình khối: chữ nhật, tròn, đường thẳng… (nút ghép, bấm ▾ để đổi hình)
+- Mũi tên
+- Đánh số bước ①②③ — bấm liên tiếp để đặt
+- Ghi chú bằng chữ
+- Tô sáng (chỉnh được màu và độ đậm)
+- Che mờ vùng riêng tư (email, số điện thoại, số tài khoản…)
+- Đo kích thước một vùng
+- Hút màu từ ảnh
+- Quét mã QR trong ảnh (hoặc quét thẳng từ màn hình)
+- Chọn / di chuyển / xoá phần tử; kéo tô một vùng để chọn và xoá cả loạt
+- Hoàn tác `Ctrl + Z`, làm lại `Ctrl + Y`
+- Đặt tiêu đề cho mục trước khi lưu
+- Sửa lại chú thích của ảnh đã đăng (ảnh gốc vẫn được giữ)
+
+## 3. Chia sẻ
+
+- Lưu lên Cloudflare R2, trả link công khai dạng `/v/<id>`
+- Tự copy link vào clipboard sau khi lưu
+- Trang xem link có sẵn cho người nhận, không cần cài gì
+- Lưu file về máy thay vì đăng lên (với video)
+
+## 4. Thư viện
+
+- Xem toàn bộ ảnh / video đã đăng
+- Tìm theo tiêu đề, lọc theo thời gian và theo loại (ảnh / video)
+- Copy link, mở link, đổi tiêu đề, sửa lại chú thích
+- Xoá một mục hoặc chọn nhiều mục xoá cùng lúc
+
+## 5. Quản lý dữ liệu
+
+- Xem dung lượng đang dùng, gom theo ngày / tuần / tháng
+- Dọn nhanh dữ liệu cũ theo mốc thời gian (7 / 30 / 90 / 180 ngày / 1 năm, hoặc chọn ngày)
+- Tra một mục theo **id, link chia sẻ, hoặc tiêu đề** — còn sống thì hiện link, đã xoá thì
+  chỉ ra máy nào, thư mục nào đang giữ bản sao
+- Sao lưu về máy trước khi xoá trên cloud, và khôi phục ngược lên từ thư mục đã lưu
+- Sổ kho dùng chung mọi máy: máy nào đăng nhập cùng tài khoản cũng thấy nội dung đã xoá
+  đang nằm ở đâu
+- Đối chiếu với R2 để tìm file rác (file còn trên cloud nhưng không còn bản ghi) và dọn đi
+
+## 6. Mức sử dụng
+
+- Thống kê dung lượng R2 + số bản ghi D1, tốc độ tăng dữ liệu
+- Ước tính khi nào chạm giới hạn gói Free của Cloudflare
+- Số lượt gọi worker do chính worker tự đếm theo từng ngày
+
+## 7. Tài khoản & hệ thống
+
+- Đăng ký / đăng nhập, phiên đăng nhập sống 30 ngày
+- Chạy nền ở khay hệ thống (system tray)
+- Tự khởi động cùng Windows (bật/tắt trong Cài đặt)
+- Tự kiểm tra và cài bản cập nhật mới
+- Tự tải ffmpeg lần đầu nếu máy chưa có
+

@@ -402,6 +402,34 @@ export function parseItemId(raw: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Một mục tìm được — dùng chung cho tra theo id lẫn tìm theo tiêu đề. */
+export interface FoundLive {
+  type: "image" | "video";
+  title: string | null;
+  createdAt: number;
+  url: string;
+}
+export interface FoundItem {
+  id: string;
+  /** Còn trên cloud hay không. null = đã xoá, chỉ còn bản sao dưới máy (nếu có). */
+  live: FoundLive | null;
+  copies: ArchivedItem[];
+}
+
+/**
+ * Tìm theo tiêu đề. Server tra cả bảng nội dung còn sống lẫn sổ kho, nên mục đã xoá khỏi
+ * cloud mà còn bản sao dưới máy vẫn tìm ra được — đúng thứ người ta cần khi đi tìm lại.
+ */
+export async function searchTitle(q: string, limit = 50): Promise<{ results: FoundItem[]; truncated: boolean }> {
+  const res = await fetchRetry(
+    `${WORKER_URL}/api/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    { headers: authHeaders() }
+  );
+  if (!res.ok) throw new Error(`Không tìm được (HTTP ${res.status})`);
+  const data = await res.json();
+  return { results: Array.isArray(data?.results) ? data.results : [], truncated: !!data?.truncated };
+}
+
 export interface IdLookup {
   id: string;
   /** Còn trên cloud hay không. null = đã xoá, link cũ đang chết. */

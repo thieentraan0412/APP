@@ -973,8 +973,12 @@ function App() {
     }
   }
 
-  /** `preset` = khôi phục thẳng từ thư mục đã nhớ, bỏ qua bước chọn thư mục. */
-  async function handleRestore(preset?: string) {
+  /**
+   * `preset` = khôi phục thẳng từ thư mục đã nhớ, bỏ qua bước chọn thư mục.
+   * `onlyIds` = chỉ khôi phục đúng mấy mục đó (nút trên từng dòng trong kho); bỏ trống thì
+   * khôi phục cả kho.
+   */
+  async function handleRestore(preset?: string, onlyIds?: string[]) {
     const dir = preset ?? (await pickFolder("Chọn thư mục kho đã lưu trước đó"));
     if (!dir) return;
 
@@ -993,20 +997,35 @@ function App() {
       // Thư mục tự chọn mà đúng là kho thì nhớ luôn — lần sau bấm một phát là xong.
       await syncArchiveDir(dir);
 
-      const bytes = scan.entries.reduce((s, e) => s + (e.bytes || 0), 0);
-      const warn = scan.missing.length > 0 ? ` (${scan.missing.length} mục thiếu file sẽ bỏ qua)` : "";
+      // Lọc theo id khi bấm khôi phục một dòng. Id có trong sổ nhưng thiếu trong manifest
+      // (hoặc file đã bị xoá khỏi thư mục) thì báo rõ, đừng im lặng khôi phục cả kho.
+      const entries = onlyIds ? scan.entries.filter((e) => onlyIds.includes(e.id)) : scan.entries;
+      if (entries.length === 0) {
+        const missing = scan.missing.some((e) => onlyIds?.includes(e.id));
+        showToast(
+          missing
+            ? "File của mục này không còn trong thư mục kho — không khôi phục được"
+            : "Không tìm thấy mục này trong sổ của thư mục kho"
+        );
+        return;
+      }
+
+      const bytes = entries.reduce((s, e) => s + (e.bytes || 0), 0);
+      const warn = !onlyIds && scan.missing.length > 0 ? ` (${scan.missing.length} mục thiếu file sẽ bỏ qua)` : "";
       // Khôi phục KHÔNG xoá gì cả — dùng nút xanh "Khôi phục", đừng để nút đỏ ghi "Xoá"
       // làm người dùng tưởng bấm vào là mất dữ liệu rồi không dám bấm.
       const ok = await askConfirm(
-        `Khôi phục ${scan.entries.length} mục (${fmtBytes(bytes)}) lên cloud?${warn} ` +
+        (entries.length === 1
+          ? `Khôi phục “${entries[0].title || "(không tiêu đề)"}” (${fmtBytes(bytes)}) lên cloud? `
+          : `Khôi phục ${entries.length} mục (${fmtBytes(bytes)}) lên cloud?${warn} `) +
           `Mỗi mục xin lại link chia sẻ cũ; mục nào có id đã bị dùng lại thì nhận link mới. ` +
           `File dưới máy vẫn giữ nguyên.`,
         { confirmLabel: "Khôi phục", icon: "☁️", danger: false }
       );
       if (!ok) return;
 
-      setArchiveProgress({ title: "Đang khôi phục…", done: 0, total: scan.entries.length, label: "" });
-      const r = await restoreEntries(dir, scan.entries, (p) =>
+      setArchiveProgress({ title: "Đang khôi phục…", done: 0, total: entries.length, label: "" });
+      const r = await restoreEntries(dir, entries, (p) =>
         setArchiveProgress({ title: "Đang khôi phục…", ...p })
       );
 
