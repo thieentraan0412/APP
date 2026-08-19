@@ -97,6 +97,12 @@ fn trigger_region_capture(app: &AppHandle) {
 }
 
 fn trigger_region_record(app: &AppHandle) {
+    // Đang quay → chính phím này DỪNG luôn, không bắt người dùng nhớ sang phím "Quay
+    // toàn màn hình" mới tắt được phiên quay vùng mà nó vừa bật.
+    if record::is_recording(app) {
+        record::toggle_recording(app);
+        return;
+    }
     capture::begin_region_selection(app.clone(), true);
 }
 

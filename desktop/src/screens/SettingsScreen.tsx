@@ -112,7 +112,7 @@ const KEY_LABELS: Record<keyof Keys, string> = {
   capture: "Chụp ảnh",
   region: "Chụp vùng màn hình",
   record: "Quay / dừng video",
-  regionRecord: "Quay vùng màn hình",
+  regionRecord: "Quay / dừng vùng màn hình",
   pause: "Tạm dừng / quay tiếp",
 };
 
