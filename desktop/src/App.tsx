@@ -334,20 +334,23 @@ function App() {
     window.addEventListener("paste", handlePaste);
 
     const subs = [
-      listen<string>("image-captured", (e) => {
+      listen<{ dataUrl: string; region: boolean }>("image-captured", (e) => {
+        const { dataUrl, region } = e.payload;
         if (qrModeRef.current) {
           qrModeRef.current = false;
-          decodeQr(e.payload);
+          decodeQr(dataUrl);
           return;
         }
         setError(null);
         setEditId(null);
         setInitialAnnotations(null);
         setEditTitle("");
-        setImage(e.payload);
+        setImage(dataUrl);
         setScreen("editor");
-        // KHÔNG tự dò QR trên ảnh chụp thường: modal "Mã QR" chỉ hiện khi người dùng
-        // chủ động dùng chức năng Quét QR (qrModeRef). Tránh popup QR khi chụp ảnh bình thường.
+        // Ảnh CẮT VÙNG (phím tắt chụp vùng / nút chụp vùng): tự dò QR im lặng — có mã thì
+        // hiện luôn modal link, không có thì không báo gì. Ảnh chụp full KHÔNG tự dò, tránh
+        // popup QR bất ngờ khi trên màn hình tình cờ có mã.
+        if (region) decodeQr(dataUrl, true);
       }),
       listen("region-cancelled", () => { qrModeRef.current = false; }),
       // Chụp lỗi (kể cả khi đang ở chế độ Quét QR) → reset qrModeRef, nếu không lần
@@ -569,7 +572,8 @@ function App() {
     try { const u = new URL(s); return u.protocol === "http:" || u.protocol === "https:"; } catch { return false; }
   }
 
-  function decodeQr(dataUrl: string) {
+  // silent = true: chỉ hiện modal khi TÌM THẤY mã (dùng cho tự dò trên ảnh cắt vùng).
+  function decodeQr(dataUrl: string, silent = false) {
     // Xoá kết quả QR cũ trước: tránh modal của lần quét trước còn sót lại khi ảnh mới không có QR.
     setQrResult(null);
     const img = new Image();
@@ -585,8 +589,8 @@ function App() {
         const code = jsQR(imageData.data, img.width, img.height);
         if (code) {
           setQrResult({ found: true, text: code.data, isUrl: isHttpUrl(code.data) });
-        } else {
-          // Chỉ được gọi khi người dùng chủ động Quét QR → báo rõ không tìm thấy.
+        } else if (!silent) {
+          // Người dùng chủ động Quét QR → báo rõ là không tìm thấy.
           setQrResult({ found: false });
         }
       } catch {}

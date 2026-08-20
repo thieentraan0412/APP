@@ -33,6 +33,15 @@ impl Default for RegionState {
     }
 }
 
+// Payload sự kiện "image-captured". Cờ `region` cho frontend biết ảnh đến từ CẮT VÙNG
+// (Alt+A) hay chụp full — chỉ ảnh cắt mới tự dò QR.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapturedImage {
+    pub data_url: String,
+    pub region: bool,
+}
+
 // Có đang chụp vùng không (để lib.rs chặn chụp full xen ngang).
 pub fn region_active(app: &AppHandle) -> bool {
     app.state::<RegionState>().active.load(Ordering::SeqCst)
@@ -174,10 +183,7 @@ pub fn confirm_region_capture(
     if let Some(sel) = app.get_webview_window("region_selector") {
         let _ = sel.hide();
     }
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.set_focus();
-    }
+    crate::focus_main(&app);
 
     // Crop trong closure để mọi lỗi đều báo về main qua "capture-error" (H3): trước đây
     // lỗi crop chỉ trả Err (RegionSelector không .catch) → overlay đã đóng, main hiện lên
@@ -210,7 +216,7 @@ pub fn confirm_region_capture(
 
     match result {
         Ok(data_url) => {
-            let _ = app.emit("image-captured", data_url);
+            let _ = app.emit("image-captured", CapturedImage { data_url, region: true });
             Ok(())
         }
         Err(e) => {
@@ -228,10 +234,7 @@ pub fn cancel_region_capture(app: AppHandle) {
     if let Some(sel) = app.get_webview_window("region_selector") {
         let _ = sel.hide();
     }
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.set_focus();
-    }
+    crate::focus_main(&app);
     let _ = app.emit("region-cancelled", ());
 }
 

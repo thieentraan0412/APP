@@ -71,6 +71,21 @@ fn save_shortcuts_file(app: &AppHandle, capture: &str, record: &str, region: &st
     }
 }
 
+// Đưa cửa sổ chính ra trước mặt người dùng (chụp xong / quay xong / huỷ chọn vùng).
+// Windows không cho tiến trình đang ở nền tự chiếm foreground: chỉ show() + set_focus()
+// thì cửa sổ có hiện nhưng nằm SAU ứng dụng người dùng đang dùng, nên nhìn như app không
+// bật lên. Nhấc tạm always-on-top rồi hạ xuống ngay buộc nó nổi lên trên cùng mà không
+// bị dính "luôn trên cùng" vĩnh viễn. unminimize() để khôi phục cả khi đang thu nhỏ.
+pub fn focus_main(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+        let _ = win.set_focus();
+        let _ = win.set_always_on_top(false);
+    }
+}
+
 fn trigger_capture(app: &AppHandle) {
     // H2: đang chụp vùng (overlay mở) → bỏ qua chụp full để không tráo kết quả
     // giữa ảnh full và ảnh vùng / dò QR.
@@ -79,12 +94,8 @@ fn trigger_capture(app: &AppHandle) {
     }
     match capture::capture_primary_png_base64() {
         Ok(data_url) => {
-            let _ = app.emit("image-captured", data_url);
-            if let Some(win) = app.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.unminimize();
-                let _ = win.set_focus();
-            }
+            let _ = app.emit("image-captured", capture::CapturedImage { data_url, region: false });
+            focus_main(app);
         }
         Err(e) => {
             let _ = app.emit("capture-error", e);
