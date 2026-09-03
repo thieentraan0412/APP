@@ -242,3 +242,13 @@ export function IconEyedrop() {
     </Svg>
   );
 }
+
+export function IconDownload() {
+  return (
+    <Svg>
+      <path d="M12 3v12" />
+      <path d="M7.5 10.5L12 15l4.5-4.5" />
+      <path d="M4.5 19.5h15" />
+    </Svg>
+  );
+}
