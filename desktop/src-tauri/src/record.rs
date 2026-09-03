@@ -440,10 +440,9 @@ fn stop(app: &AppHandle) {
         match finalize(&app, ffmpeg.as_ref(), &segments, &final_out) {
             Ok(path) => {
                 let _ = app.emit("video-ready", path.to_string_lossy().to_string());
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Encode xong (có thể mất vài giây, người dùng đã chuyển sang việc khác)
+                // → gọi lại cho chắc, để xem/lưu video ngay.
+                crate::focus_main(&app);
             }
             Err(e) => {
                 let _ = app.emit("video-error", e);
@@ -578,8 +577,6 @@ fn show_main(app: &AppHandle) {
                 ));
             }
         }
-        let _ = main.unminimize();
-        let _ = main.show();
-        let _ = main.set_focus();
     }
+    crate::focus_main(app);
 }
