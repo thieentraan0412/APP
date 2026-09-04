@@ -9,6 +9,14 @@ interface Props {
   regionRecord: string;
   /** Lưu ngay khi đổi. Trả về false nếu không lưu được → ô phím quay lại giá trị cũ. */
   onSave: (capture: string, record: string, region: string, pause: string, regionRecord: string) => Promise<boolean>;
+  /** Chiều cao tối đa (px) của ảnh chụp và của video quay — hai mức tách riêng. */
+  imageQuality: number;
+  videoQuality: number;
+  /** Cũng lưu ngay khi đổi; false = không lưu được → nút quay lại mức cũ. */
+  onSaveQuality: (image: number, video: number) => Promise<boolean>;
+  /** [rộng, cao] màn hình chính (nguồn ảnh chụp) rồi [rộng, cao] cả virtual desktop
+   *  (nguồn video toàn màn hình), px vật lý. null = chưa đọc được. */
+  captureSizes: [number, number, number, number] | null;
   onBack: () => void;
   onCheckUpdate: () => void;
   updateChecking: boolean;
@@ -60,6 +68,9 @@ const UpdateIcon = (
 const UserIcon = (
   <svg {...IconS}><circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 4-6.5 8-6.5s8 2.5 8 6.5" /></svg>
 );
+const QualityIcon = (
+  <svg {...IconS}><rect x="2" y="4" width="20" height="13" rx="2" /><path d="M8 21h8M12 17v4" /><path d="M7 13V9l3 4V9" /></svg>
+);
 const PowerIcon = (
   <svg {...IconS}><path d="M18.36 6.64a9 9 0 1 1-12.73 0" /><line x1="12" y1="2" x2="12" y2="12" /></svg>
 );
@@ -100,6 +111,66 @@ function ShortcutCapture({
   );
 }
 
+// Ba mức chất lượng, tính theo CHIỀU CAO tối đa. Chỉ thu nhỏ khi màn hình / ảnh lớn hơn
+// mức chọn — màn 1080p chọn "2K" thì không có gì thay đổi.
+const QUALITY_OPTIONS: { value: number; label: string; hint: string }[] = [
+  { value: 720, label: "720p", hint: "Cao tối đa 720px — file nhẹ nhất, gửi đi nhanh" },
+  { value: 1080, label: "Full HD", hint: "Cao tối đa 1080px — cân bằng giữa nét và nhẹ" },
+  { value: 1440, label: "2K", hint: "Cao tối đa 1440px — nét nhất, file nặng hơn" },
+];
+
+// Kết quả thật của một mức trên nguồn cụ thể. Đây là phần quan trọng nhất của cả thẻ này:
+// trên màn 1080p, "Full HD" và "2K" cho ra ảnh GIỐNG HỆT nhau (đều 1920×1080, vì không
+// phóng to) — thấy hai con số bằng nhau thì người dùng hiểu ngay, còn nếu chỉ có nhãn thì
+// họ tưởng cài đặt bị hỏng.
+function outSize(src: [number, number] | null, maxH: number): string | null {
+  if (!src) return null;
+  const [w, h] = src;
+  if (w <= 0 || h <= 0) return null;
+  if (h <= maxH) return `${w}×${h}`;
+  return `${Math.round((w * maxH) / h)}×${maxH}`;
+}
+
+function QualityPicker({
+  label,
+  value,
+  source,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  /** Nguồn để tính ra kích thước thật hiện dưới mỗi nút; null thì chỉ hiện nhãn. */
+  source: [number, number] | null;
+  disabled: boolean;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="setting-row">
+      <span className="setting-label">{label}</span>
+      <div className="segmented" role="group" aria-label={label}>
+        {QUALITY_OPTIONS.map((o) => {
+          const out = outSize(source, o.value);
+          return (
+            <button
+              key={o.value}
+              type="button"
+              className={"segmented-btn" + (value === o.value ? " active" : "")}
+              disabled={disabled}
+              title={o.hint}
+              aria-pressed={value === o.value}
+              onClick={() => onChange(o.value)}
+            >
+              <span className="segmented-main">{o.label}</span>
+              {out && <span className="segmented-sub">{out}</span>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 interface Keys {
   capture: string;
   record: string;
@@ -124,7 +195,7 @@ const DEFAULT_KEYS: Keys = {
   regionRecord: "Control+Shift+4",
 };
 
-export function SettingsScreen({ capture, record, region, pause, regionRecord, onSave, onBack, onCheckUpdate, updateChecking, userEmail, onLogout }: Props) {
+export function SettingsScreen({ capture, record, region, pause, regionRecord, onSave, imageQuality, videoQuality, onSaveQuality, captureSizes, onBack, onCheckUpdate, updateChecking, userEmail, onLogout }: Props) {
   const [keys, setKeys] = useState<Keys>({ capture, record, region, pause, regionRecord });
   const [saving, setSaving] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
@@ -157,6 +228,32 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
       setHint(null);
     }
     apply(next);
+  }
+
+  // Chất lượng ảnh / video. Cùng cách làm với phím tắt: hiện mức mới ngay cho khỏi khựng,
+  // lưu hỏng thì trả về mức cũ.
+  const [qual, setQual] = useState({ image: imageQuality, video: videoQuality });
+  const [qualSaving, setQualSaving] = useState(false);
+
+  // Mức thật do Rust trả về đến sau một nhịp IPC. Không đồng bộ lại thì mở Cài đặt sớm sẽ
+  // thấy nút sáng ở mức MẶC ĐỊNH chứ không phải mức đang dùng — người dùng bấm đúng mức
+  // họ muốn, hàm change() thấy "trùng giá trị cũ" nên bỏ qua, và không có gì được lưu.
+  useEffect(() => {
+    if (!qualSaving) setQual({ image: imageQuality, video: videoQuality });
+  }, [imageQuality, videoQuality]);
+
+  async function changeQuality(field: "image" | "video", value: number) {
+    if (qual[field] === value) return;
+    const prev = qual;
+    const next = { ...qual, [field]: value };
+    setQual(next);
+    setQualSaving(true);
+    try {
+      const ok = await onSaveQuality(next.image, next.video);
+      if (!ok) setQual(prev);
+    } finally {
+      setQualSaving(false);
+    }
   }
 
   // Tự khởi động cùng máy — đọc trạng thái thật từ hệ điều hành khi mở Cài đặt.
@@ -221,6 +318,43 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
               Khôi phục mặc định
             </button>
             {hint && <span className="settings-hint">{hint}</span>}
+          </div>
+        </section>
+
+        {/* Chất lượng ảnh & video */}
+        <section className="settings-card">
+          <div className="settings-card-head">
+            <div className="settings-card-icon">{QualityIcon}</div>
+            <div className="settings-card-heading">
+              <h3 className="settings-card-title">Chất lượng ảnh & video</h3>
+              <p className="settings-card-desc">
+                Giới hạn độ phân giải theo chiều cao. Ảnh hoặc màn hình nhỏ hơn mức chọn thì
+                giữ nguyên, không bị phóng to. Mức càng thấp thì file càng nhẹ và gửi càng nhanh.
+              </p>
+            </div>
+          </div>
+          <div className="settings-card-body">
+            <QualityPicker
+              label="Chất lượng ảnh chụp"
+              value={qual.image}
+              source={captureSizes ? [captureSizes[0], captureSizes[1]] : null}
+              disabled={qualSaving}
+              onChange={(v) => changeQuality("image", v)}
+            />
+            <QualityPicker
+              label="Chất lượng video quay"
+              value={qual.video}
+              source={captureSizes ? [captureSizes[2], captureSizes[3]] : null}
+              disabled={qualSaving}
+              onChange={(v) => changeQuality("video", v)}
+            />
+          </div>
+          <div className="settings-card-footer">
+            <span className="settings-hint">
+              Số dưới mỗi mức là kích thước thật sẽ nhận được. Hai mức ra cùng một số nghĩa là
+              màn hình của bạn thấp hơn cả hai — chọn mức nào cũng cho ra ảnh y hệt nhau.
+              Mức mới áp dụng cho lần chụp / quay tiếp theo; phiên quay đang chạy vẫn giữ mức cũ.
+            </span>
           </div>
         </section>
 

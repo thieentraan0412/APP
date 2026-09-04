@@ -437,6 +437,54 @@ kbd {
   padding-bottom: 0;
 }
 
+/* Bộ chọn 3 mức chất lượng — dính liền thành một dải, mức đang chọn tô nền chính */
+.segmented {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg, transparent);
+}
+.segmented-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  min-width: 88px;
+  padding: 0.35rem 0.7rem;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-soft);
+  cursor: pointer;
+  box-shadow: none;
+}
+.segmented-btn + .segmented-btn {
+  border-left: 1px solid var(--border);
+}
+.segmented-btn:hover:not(:disabled):not(.active) {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.segmented-btn.active {
+  background: var(--primary);
+  color: #fff;
+}
+/* Kích thước thật của mức đó — nhỏ và nhạt hơn nhãn, đọc lướt vẫn thấy hai mức trùng số */
+.segmented-sub {
+  font-size: 0.68rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+.segmented-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Hàng hành động: có gạch phân cách phía trên (dùng cho card phím tắt) */
 .settings-card-footer {
   display: flex;

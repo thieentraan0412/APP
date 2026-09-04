@@ -71,6 +71,26 @@ fn rgba_to_data_url(raw: &[u8], w: u32, h: u32) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", b64))
 }
 
+// Thu nhỏ ảnh cho vừa mức chất lượng người dùng chọn trong Cài đặt (tính theo chiều cao).
+// Ảnh đã nhỏ hơn mức chọn thì GIỮ NGUYÊN: phóng to không thêm được chi tiết nào, chỉ làm
+// ảnh mờ và file nặng thêm. Vùng chọn nhỏ (vài trăm px) vì thế không bị đụng tới.
+fn fit_height(raw: Vec<u8>, w: u32, h: u32, max_h: u32) -> (Vec<u8>, u32, u32) {
+    if max_h == 0 || h <= max_h || w == 0 {
+        return (raw, w, h);
+    }
+    let nw = ((w as f64) * (max_h as f64) / (h as f64)).round().max(1.0) as u32;
+    // Mượn raw thay vì clone — ảnh 4K là ~33MB, nhân đôi chỉ để đổi kiểu là quá phí.
+    let view: image::ImageBuffer<image::Rgba<u8>, &[u8]> =
+        match image::ImageBuffer::from_raw(w, h, raw.as_slice()) {
+            Some(v) => v,
+            None => return (raw, w, h), // buffer không khớp kích thước → thôi, giữ ảnh gốc
+        };
+    // CatmullRom: nét hơn Triangle ở chữ nhỏ (ảnh chụp màn hình toàn chữ) mà vẫn nhanh
+    // hơn Lanczos3 đáng kể.
+    let out = image::imageops::resize(&view, nw, max_h, image::imageops::FilterType::CatmullRom);
+    (out.into_raw(), nw, max_h)
+}
+
 fn copy_rgba_to_clipboard(raw: Vec<u8>, w: u32, h: u32) {
     std::thread::spawn(move || {
         if let Ok(mut cb) = Clipboard::new() {
@@ -84,15 +104,58 @@ fn copy_rgba_to_clipboard(raw: Vec<u8>, w: u32, h: u32) {
     });
 }
 
-pub fn capture_primary_png_base64() -> Result<String, String> {
+pub fn capture_primary_png_base64(max_h: u32) -> Result<String, String> {
     let (raw, w, h) = capture_primary_raw()?;
+    // Thu nhỏ TRƯỚC khi chép clipboard để ảnh dán ra ngoài giống hệt ảnh trong app.
+    let (raw, w, h) = fit_height(raw, w, h, max_h);
     copy_rgba_to_clipboard(raw.clone(), w, h);
     rgba_to_data_url(&raw, w, h)
 }
 
+// Kích thước THẬT (pixel vật lý) của nguồn chụp và nguồn quay. Màn Cài đặt dùng nó để nói
+// thẳng mỗi mức chất lượng cho ra ảnh/video bao nhiêu px — nếu không, trên màn 1080p hai
+// mức "Full HD" và "2K" cho ra kết quả y hệt nhau mà người dùng không tài nào đoán được
+// vì sao. Trả về 4 số: (rộng, cao) màn hình chính — nguồn của ảnh chụp; rồi (rộng, cao)
+// hộp bao mọi màn hình — nguồn của video toàn màn hình, vì gdigrab thu cả virtual desktop
+// chứ không riêng màn chính.
 #[tauri::command]
-pub fn capture_screen() -> Result<String, String> {
-    capture_primary_png_base64()
+pub fn capture_sizes() -> Result<(u32, u32, u32, u32), String> {
+    let monitors = Monitor::all().map_err(|e| e.to_string())?;
+    let m = monitors
+        .iter()
+        .find(|m| m.is_primary().unwrap_or(false))
+        .or_else(|| monitors.first())
+        .ok_or("Không tìm thấy màn hình nào")?;
+    let pw = m.width().map_err(|e| e.to_string())?;
+    let ph = m.height().map_err(|e| e.to_string())?;
+
+    let (mut left, mut top, mut right, mut bottom) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for mon in &monitors {
+        let (x, y) = match (mon.x(), mon.y()) {
+            (Ok(x), Ok(y)) => (x, y),
+            _ => continue,
+        };
+        let (w, h) = match (mon.width(), mon.height()) {
+            (Ok(w), Ok(h)) => (w as i32, h as i32),
+            _ => continue,
+        };
+        left = left.min(x);
+        top = top.min(y);
+        right = right.max(x + w);
+        bottom = bottom.max(y + h);
+    }
+    // Không đọc được màn nào → lấy tạm màn chính, hơn là trả số âm vô nghĩa.
+    let (vw, vh) = if right > left && bottom > top {
+        ((right - left) as u32, (bottom - top) as u32)
+    } else {
+        (pw, ph)
+    };
+    Ok((pw, ph, vw, vh))
+}
+
+#[tauri::command]
+pub fn capture_screen(app: AppHandle) -> Result<String, String> {
+    capture_primary_png_base64(crate::image_quality(&app))
 }
 
 // Ẩn main window, chờ 150ms để nó biến khỏi màn hình, mở overlay chọn vùng.
@@ -210,6 +273,7 @@ pub fn confirm_region_capture(
             cropped.extend_from_slice(&raw[start..start + cw as usize * 4]);
         }
 
+        let (cropped, cw, ch) = fit_height(cropped, cw, ch, crate::image_quality(&app));
         copy_rgba_to_clipboard(cropped.clone(), cw, ch);
         rgba_to_data_url(&cropped, cw, ch)
     })();

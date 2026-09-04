@@ -60,6 +60,10 @@ struct Session {
     // sau khi "quay tiếp" cắt sai vùng sẽ khác độ phân giải đoạn trước → nối bằng
     // `-c copy` thất bại, mất trắng bản quay.
     crop: Option<Crop>,
+    // Chiều cao tối đa (px) của phiên quay, chốt lúc bắt đầu. PHẢI giữ nguyên suốt phiên
+    // vì lý do y hệt `crop`: người dùng đổi Cài đặt giữa chừng mà đoạn sau ra độ phân giải
+    // khác thì nối bằng `-c copy` sẽ thất bại, mất trắng bản quay.
+    max_h: u32,
     // Tổng thời lượng các đoạn ĐÃ đóng (ms) — dùng để chặn ở MAX_RECORD_MS.
     elapsed_ms: u64,
     // Mốc bắt đầu đoạn đang quay; None khi đang tạm dừng (lúc đó không cộng thời gian).
@@ -95,6 +99,7 @@ fn spawn_segment(
     ffmpeg: &PathBuf,
     out: &PathBuf,
     crop: Option<&Crop>,
+    max_h: u32,
 ) -> Result<Child, String> {
     let out_str = out.to_string_lossy().to_string();
     let mut args: Vec<String> = vec![
@@ -112,12 +117,25 @@ fn spawn_segment(
     // - Toạ độ dùng floor() (KHÔNG round) để bảo đảm x+w <= in_w: x <= in*fx và
     //   w <= in*fw + 0.5, nên x+w <= in + 0.5; x, w nguyên ⇒ x+w <= in. Nếu round cả hai
     //   thì vùng sát mép phải có thể tràn 1px và ffmpeg từ chối cả phiên quay.
+    let mut filters: Vec<String> = Vec::new();
     if let Some(c) = crop {
-        args.push("-vf".into());
-        args.push(format!(
+        filters.push(format!(
             "crop=floor(round(in_w*{fw:.8})/2)*2:floor(round(in_h*{fh:.8})/2)*2:floor(in_w*{fx:.8}):floor(in_h*{fy:.8})",
             fw = c.fw, fh = c.fh, fx = c.fx, fy = c.fy,
         ));
+    }
+    // Hạ độ phân giải theo mức chất lượng đã chọn. Dùng biểu thức min(...) chứ không phải
+    // số cứng để KHÔNG BAO GIỜ phóng to: màn 1080p chọn mức 2K thì giữ nguyên 1080p.
+    // - Dấu phẩy trong min() phải escape, nếu không ffmpeg đọc nhầm thành dấu ngăn hai bộ lọc.
+    // - Chiều rộng -2 = tự suy theo tỉ lệ và LÀM TRÒN VỀ SỐ CHẴN, bắt buộc với libx264 +
+    //   yuv420p (cạnh lẻ là ffmpeg chết ngay lúc khởi động); trunc(../2)*2 lo nốt chiều
+    //   cao, vì giữ nguyên ih của một màn hình cao lẻ cũng ra cạnh lẻ y như vậy.
+    if max_h > 0 {
+        filters.push(format!("scale=-2:trunc(min({max_h}\\,ih)/2)*2"));
+    }
+    if !filters.is_empty() {
+        args.push("-vf".into());
+        args.push(filters.join(","));
     }
     args.extend([
         "-c:v".into(), "libx264".into(),
@@ -210,6 +228,9 @@ pub fn toggle_pause(app: &AppHandle) {
 }
 
 fn start(app: &AppHandle, crop: Option<Crop>) {
+    // Đọc mức chất lượng NGAY tại đây và giữ nguyên tới hết phiên — xem ghi chú ở
+    // Session::max_h về việc mọi đoạn phải cùng độ phân giải mới nối được.
+    let max_h = crate::video_quality(app);
     // Chạy trong thread để không treo UI khi lần đầu tải ffmpeg.
     let app = app.clone();
     std::thread::spawn(move || {
@@ -226,7 +247,7 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
         };
 
         let out = seg_path(0);
-        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref()) {
+        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref(), max_h) {
             Ok(mut child) => {
                 let generation = {
                     let st = app.state::<RecState>();
@@ -239,6 +260,7 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
                     s.segments = Vec::new();
                     s.seg_index = 0;
                     s.crop = crop;
+                    s.max_h = max_h;
                     s.busy = false; // khởi động xong
                     s.elapsed_ms = 0;
                     s.seg_started = Some(std::time::Instant::now());
@@ -337,14 +359,14 @@ fn resume(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let st = app.state::<RecState>();
-        let (ffmpeg, new_index, crop) = {
+        let (ffmpeg, new_index, crop, max_h) = {
             let mut s = st.inner.lock().unwrap();
             if !s.recording || !s.paused {
                 s.busy = false; // (H5)
                 return;
             }
             // Giữ nguyên vùng của phiên quay → mọi đoạn cùng độ phân giải để nối được.
-            (s.ffmpeg.clone(), s.seg_index + 1, s.crop)
+            (s.ffmpeg.clone(), s.seg_index + 1, s.crop, s.max_h)
         };
         let ffmpeg = match ffmpeg {
             Some(f) => f,
@@ -354,7 +376,7 @@ fn resume(app: &AppHandle) {
             }
         };
         let out = seg_path(new_index);
-        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref()) {
+        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref(), max_h) {
             Ok(mut child) => {
                 {
                     let mut s = st.inner.lock().unwrap();

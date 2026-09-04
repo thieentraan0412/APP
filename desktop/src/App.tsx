@@ -58,6 +58,9 @@ import "./App.css";
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage" | "data";
 
 const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3", pause: "Control+Shift+H", regionRecord: "Control+Shift+4" };
+// Chất lượng = chiều CAO tối đa (px). Mặc định 2K để máy 1080p/1440p không bị đổi gì so
+// với trước khi có setting này (chỉ thu nhỏ, không bao giờ phóng to — xem fit_height ở Rust).
+const DEFAULT_QUALITY = { image: 1440, video: 1440 };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
 // Trần độ dài một phiên quay. Rust mới là bên thực thi (MAX_RECORD_MS trong record.rs) —
 // hằng số này chỉ để hiển thị; sửa thì phải sửa cả hai cho khớp.
@@ -230,6 +233,10 @@ function App() {
   }, [archiveStores, device]);
 
   const [shortcuts, setShortcuts] = useState(DEFAULT_SHORTCUTS);
+  const [quality, setQuality] = useState(DEFAULT_QUALITY);
+  // Kích thước nguồn thật (px vật lý): [rộng, cao] màn chính cho ảnh chụp, rồi [rộng, cao]
+  // cả virtual desktop cho video toàn màn hình. null = chưa đọc được.
+  const [captureSizes, setCaptureSizes] = useState<[number, number, number, number] | null>(null);
 
   // Video chờ lưu (chưa upload)
   const [videoPendingReady, setVideoPendingReady] = useState(false);
@@ -405,6 +412,32 @@ function App() {
       }
     })();
     return () => { cancelled = true; };
+  }, []);
+
+  // ĐỌC mức chất lượng từ Rust — file cấu hình bên đó mới là bản chính, vì phím tắt toàn
+  // cục chụp/quay đọc thẳng từ nó và chạy được cả khi frontend chưa kịp lên. Đẩy ngược
+  // giá trị của webview lên như phần phím tắt sẽ đạp mức đã chọn về mặc định mỗi lần
+  // localStorage trống. Thử lại vài lần vì lời gọi IPC đầu tiên của WebView2 hay rớt.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      for (let i = 0; i < 5 && !cancelled; i++) {
+        try {
+          const [image, video] = await invoke<[number, number]>("get_quality");
+          if (!cancelled) setQuality({ image, video });
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    invoke<[number, number, number, number]>("capture_sizes")
+      .then(setCaptureSizes)
+      .catch(() => {}); // không đọc được thì Cài đặt chỉ bớt phần gợi ý px
   }, []);
 
   // Kiểm tra phiên đăng nhập đã lưu khi mở app (token còn hạn?)
@@ -1203,6 +1236,20 @@ function App() {
     }
   }
 
+  // Lưu mức chất lượng. Trả về false để màn Cài đặt trả ô về giá trị cũ khi lưu hỏng —
+  // không được hiện mức mà thực tế chưa có hiệu lực.
+  async function onSaveQuality(image: number, video: number): Promise<boolean> {
+    try {
+      await invoke("set_quality", { image, video });
+      setQuality({ image, video });
+      showToast("Đã lưu chất lượng");
+      return true;
+    } catch (err) {
+      showToast("Lưu chất lượng lỗi: " + String(err));
+      return false;
+    }
+  }
+
   function backHome() {
     // Xoá file video tạm nếu user bỏ qua không lưu
     if (videoPendingRef.current) {
@@ -1377,6 +1424,7 @@ function App() {
           initialTitle={editTitle}
           onBack={editId ? openLibrary : backHome}
           onSaved={handleSaved}
+          imageQuality={quality.image}
         />
 
         {DownloadOverlay}
@@ -1498,6 +1546,10 @@ function App() {
               pause={shortcuts.pause}
               regionRecord={shortcuts.regionRecord}
               onSave={onSaveShortcuts}
+              imageQuality={quality.image}
+              videoQuality={quality.video}
+              captureSizes={captureSizes}
+              onSaveQuality={onSaveQuality}
               onBack={backHome}
               onCheckUpdate={manualCheckUpdate}
               updateChecking={updateChecking}

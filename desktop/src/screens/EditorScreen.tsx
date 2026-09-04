@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type Konva from "konva";
 import { AnnotateCanvas, HIGHLIGHT_OPACITY, measureInfo, toImagePoint } from "../components/AnnotateCanvas";
 import { Toolbar, HIGHLIGHT_COLORS } from "../components/Toolbar";
-import { flattenStage, dataUrlToBlob, imageToWebpBlob } from "../lib/flatten";
+import { flattenStage, dataUrlToBlob, imageToWebpBlob, webpQuality } from "../lib/flatten";
 import type { Annotations, Arrow, Box, Highlight, Measure, Note, Shape, StepMarker, Tool } from "../types";
 import { nanoid } from "nanoid";
 import jsQR from "jsqr";
@@ -30,9 +30,11 @@ interface Props {
   initialTitle?: string;
   onBack: () => void;
   onSaved: (flattened: Blob, original: Blob, annotations: Annotations, title: string) => void;
+  /** Mức chất lượng ảnh đang chọn (chiều cao tối đa) — quyết định mức nén khi xuất. */
+  imageQuality: number;
 }
 
-export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, onBack, onSaved }: Props) {
+export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, onBack, onSaved, imageQuality }: Props) {
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [boxes, setBoxes] = useState<Box[]>([]);
@@ -567,7 +569,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     await new Promise((r) => requestAnimationFrame(() => r(null)));
 
     const pixelRatio = 1 / fit.scale; // xuất đúng độ phân giải gốc
-    const blob = flattenStage(stageRef.current, pixelRatio);
+    const blob = flattenStage(stageRef.current, pixelRatio, webpQuality(imageQuality));
 
     // Quy đổi toạ độ về kích thước ảnh gốc
     const s = fit.scale;
@@ -593,7 +595,9 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
 
     // Ảnh gốc (để sau này sửa lại annotate) — nén WebP cho nhẹ.
     // Trước đây giữ nguyên PNG full màn hình (vài MB) nên upload lên R2 rất lâu.
-    const original = (await imageToWebpBlob(img, 0.92)) ?? dataUrlToBlob(imageDataUrl);
+    const original =
+      (await imageToWebpBlob(img, Math.max(0.92, webpQuality(imageQuality)))) ??
+      dataUrlToBlob(imageDataUrl);
 
     setSaving(false);
     onSaved(blob, original, annotations, title.trim());

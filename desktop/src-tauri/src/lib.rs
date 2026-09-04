@@ -21,6 +21,60 @@ struct ShortcutCfg {
     recreg:  Mutex<Option<Shortcut>>,
 }
 
+// Chất lượng (chiều CAO tối đa, px) của ảnh chụp và video quay. Chỉ THU NHỎ khi ảnh/màn
+// hình lớn hơn mức chọn — không bao giờ phóng to, vì phóng to chỉ làm file nặng thêm chứ
+// không thêm chi tiết. Hai giá trị tách riêng: ảnh thường cần nét hơn video.
+#[derive(Default)]
+struct QualityCfg {
+    image: Mutex<u32>,
+    video: Mutex<u32>,
+}
+
+// Mặc định 2K: máy phổ thông (1080p/1440p) giữ nguyên chất lượng như trước khi có setting
+// này, chỉ màn 4K mới bị thu xuống — không ai bỗng dưng thấy ảnh xấu đi sau khi cập nhật.
+pub const DEFAULT_QUALITY: u32 = 1440;
+const QUALITY_CHOICES: [u32; 3] = [720, 1080, 1440];
+
+fn quality_file(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("quality.cfg"))
+}
+
+// Chỉ nhận đúng ba mức có trong Cài đặt; số lạ (file hỏng, bản cũ) → mặc định, tránh để
+// lọt số 0 xuống ffmpeg làm chết cả phiên quay.
+fn parse_quality(s: Option<&str>) -> u32 {
+    s.and_then(|l| l.trim().parse::<u32>().ok())
+        .filter(|v| QUALITY_CHOICES.contains(v))
+        .unwrap_or(DEFAULT_QUALITY)
+}
+
+fn load_saved_quality(app: &AppHandle) -> (u32, u32) {
+    let content = match quality_file(app) {
+        Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
+        None => String::new(),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    (parse_quality(lines.first().copied()), parse_quality(lines.get(1).copied()))
+}
+
+fn save_quality_file(app: &AppHandle, image: u32, video: u32) {
+    if let Some(p) = quality_file(app) {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, format!("{image}\n{video}\n"));
+    }
+}
+
+// Chiều cao tối đa cho ảnh chụp / video. Đọc từ state (đã nạp lúc khởi động) nên phím tắt
+// dùng được ngay cả khi frontend chưa kịp chạy.
+pub fn image_quality(app: &AppHandle) -> u32 {
+    *app.state::<QualityCfg>().image.lock().unwrap()
+}
+
+pub fn video_quality(app: &AppHandle) -> u32 {
+    *app.state::<QualityCfg>().video.lock().unwrap()
+}
+
 const DEFAULT_CAPTURE: &str = "CommandOrControl+Shift+1";
 const DEFAULT_RECORD:  &str = "CommandOrControl+Shift+2";
 const DEFAULT_REGION:  &str = "CommandOrControl+Shift+3";
@@ -92,7 +146,7 @@ fn trigger_capture(app: &AppHandle) {
     if capture::region_active(app) {
         return;
     }
-    match capture::capture_primary_png_base64() {
+    match capture::capture_primary_png_base64(image_quality(app)) {
         Ok(data_url) => {
             let _ = app.emit("image-captured", capture::CapturedImage { data_url, region: false });
             focus_main(app);
@@ -151,6 +205,25 @@ fn set_shortcuts(app: AppHandle, capture: String, record: String, region: String
     Ok(())
 }
 
+// Đọc mức đang áp dụng. Frontend hỏi Rust chứ KHÔNG tự đẩy giá trị của mình lên lúc khởi
+// động: file cấu hình bên Rust mới là bản chính (phím tắt toàn cục chụp/quay đọc thẳng từ
+// đó), nên nếu localStorage của webview trống hay lệch thì nó sẽ âm thầm đạp mức người
+// dùng đã chọn về mặc định.
+#[tauri::command]
+fn get_quality(app: AppHandle) -> (u32, u32) {
+    (image_quality(&app), video_quality(&app))
+}
+
+#[tauri::command]
+fn set_quality(app: AppHandle, image: u32, video: u32) {
+    let image = parse_quality(Some(&image.to_string()));
+    let video = parse_quality(Some(&video.to_string()));
+    let st = app.state::<QualityCfg>();
+    *st.image.lock().unwrap() = image;
+    *st.video.lock().unwrap() = video;
+    save_quality_file(&app, image, video);
+}
+
 #[tauri::command]
 fn remove_temp(path: String) {
     let _ = std::fs::remove_file(path);
@@ -205,6 +278,7 @@ pub fn run() {
         ))
         .manage(record::RecState::default())
         .manage(ShortcutCfg::default())
+        .manage(QualityCfg::default())
         .manage(capture::RegionState::default())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -238,6 +312,15 @@ pub fn run() {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.hide();
                 }
+            }
+
+            // Chất lượng đã lưu — nạp TRƯỚC khi đăng ký phím tắt, vì phím tắt có thể được
+            // bấm ngay giây đầu tiên và lúc đó chụp/quay phải dùng đúng mức người dùng chọn.
+            {
+                let (image, video) = load_saved_quality(app.handle());
+                let st = app.state::<QualityCfg>();
+                *st.image.lock().unwrap() = image;
+                *st.video.lock().unwrap() = video;
             }
 
             // Đăng ký NGAY phím tắt đã lưu (nếu có) — dùng được liền khi mở app, không cần
@@ -294,6 +377,9 @@ pub fn run() {
             capture::confirm_region_record,
             capture::cancel_region_capture,
             set_shortcuts,
+            set_quality,
+            get_quality,
+            capture::capture_sizes,
             remove_temp,
             save_video_to_path,
             trim_video,
