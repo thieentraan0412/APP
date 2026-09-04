@@ -54,6 +54,9 @@ tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại:
 - Tra một mục theo **id, link chia sẻ, hoặc tiêu đề** — còn sống thì hiện link, đã xoá thì
   chỉ ra máy nào, thư mục nào đang giữ bản sao
 - Sao lưu về máy trước khi xoá trên cloud, và khôi phục ngược lên từ thư mục đã lưu
+- Mỗi lần tải về gói gọn trong một thư mục mang tên đúng mốc đang xem (`Tháng 8-2026/`,
+  `24-08 – 30-08-2026/`, `15-08-2026/`); trải nhiều ngày thì bên trong chia tiếp theo ngày,
+  ảnh gốc nằm cạnh ảnh đã gộp chú thích
 - Sổ kho dùng chung mọi máy: máy nào đăng nhập cùng tài khoản cũng thấy nội dung đã xoá
   đang nằm ở đâu
 - Đối chiếu với R2 để tìm file rác (file còn trên cloud nhưng không còn bản ghi) và dọn đi

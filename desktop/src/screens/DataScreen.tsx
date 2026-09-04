@@ -30,7 +30,7 @@ interface Props {
   onPurgeRange: (from: number, to: number, label: string, items: number, bytes: number) => Promise<boolean>;
   onPurgeIds: (ids: string[], bytes: number) => Promise<boolean>;
   /** Tải các mục đã chọn về máy rồi mới xoá trên cloud. true = đã xoá xong */
-  onArchiveItems: (items: StorageItem[]) => Promise<boolean>;
+  onArchiveItems: (items: StorageItem[], folder: string) => Promise<boolean>;
   /** Đọc một thư mục kho dưới máy và tải các mục trong đó lên lại.
    *  Truyền `dir` để khôi phục thẳng từ thư mục đã nhớ, bỏ qua hộp thoại chọn thư mục. */
   /** Bỏ trống `ids` = khôi phục cả kho; truyền vào = chỉ mấy mục đó */
@@ -533,7 +533,7 @@ export function DataScreen(props: Props) {
             `Xong rồi bấm lại nút này để làm tiếp phần còn lại.`
         );
       }
-      return onArchiveItems(page.items);
+      return onArchiveItems(page.items, p.label);
     }, openKey === p.key ? p : undefined);
   }
 
@@ -548,7 +548,7 @@ export function DataScreen(props: Props) {
   async function archiveSelected(p: Period) {
     const chosen = items.filter((it) => selected.has(it.id));
     if (chosen.length === 0) return;
-    const ok = await run(() => onArchiveItems(chosen), p);
+    const ok = await run(() => onArchiveItems(chosen, p.label), p);
     if (ok) setSelected(new Set());
   }
 
@@ -578,7 +578,7 @@ export function DataScreen(props: Props) {
           </p>
         </div>
         <div className="data-header-actions">
-          <button onClick={() => onRestore()} disabled={loading || busy || !!progress} title="Chọn thư mục kho đã lưu dưới máy và tải các mục trong đó lên lại">
+          <button onClick={() => onRestore()} disabled={loading || busy || !!progress} title="Chọn một hay nhiều thư mục (giữ Ctrl để chọn thêm) — cả thư mục kho lẫn thư mục theo mốc bên trong đều được — rồi tải các mục trong đó lên lại">
             <IcoRestore />Khôi phục từ máy
           </button>
           <button
@@ -737,7 +737,8 @@ export function DataScreen(props: Props) {
                 <div className="data-empty">
                   Sổ kho chưa có gì. Lưu bằng nút <b>⬇</b> ở mỗi mốc thời gian bên dưới, hoặc bấm
                   <b>“Khôi phục từ máy”</b> chọn thư mục kho cũ một lần — kho sẽ được ghi vào sổ
-                  và hiện ở đây trên <b>mọi máy</b> dùng chung tài khoản.
+                  và hiện ở đây trên <b>mọi máy</b> dùng chung tài khoản. Chọn được nhiều thư mục
+                  cùng lúc (giữ Ctrl), và chỉ thẳng vào thư mục theo mốc bên trong kho cũng nhận.
                 </div>
               ) : (
                 <div className="data-dirs">
@@ -996,7 +997,7 @@ export function DataScreen(props: Props) {
               Dung lượng tính theo số byte thật trên Cloudflare R2 (ảnh đã gộp + ảnh gốc dùng để sửa lại annotate).
               “Xoá hẳn” là xoá vĩnh viễn cả file lẫn link chia sẻ, không thể hoàn tác.
               “Lưu về máy &amp; xoá” tải nội dung xuống thư mục bạn chọn trước, chỉ xoá trên cloud những mục đã lưu xong,
-              và khôi phục lại được bằng nút “Khôi phục từ máy” — mục khôi phục xin lại đúng link chia sẻ cũ, trừ khi id đó đã bị nội dung khác dùng mất.
+              và khôi phục lại được bằng nút “Khôi phục từ máy” (chọn được nhiều thư mục một lượt, chỉ thẳng vào thư mục theo mốc bên trong kho cũng nhận) — mục khôi phục xin lại đúng link chia sẻ cũ, trừ khi id đó đã bị nội dung khác dùng mất.
             </p>
           </>
         )}

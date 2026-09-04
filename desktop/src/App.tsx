@@ -42,13 +42,18 @@ import {
 } from "./lib/api";
 import {
   pickFolder,
+  pickFolders,
+  resolveArchiveRoot,
   archiveItems,
+  archiveFolderName,
   scanArchive,
   restoreEntries,
   archiveDirState,
   openArchiveDir,
   deviceName,
   readArchiveManifest,
+  type ArchiveEntry,
+  type ArchiveFailure,
 } from "./lib/archive";
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
@@ -890,13 +895,14 @@ function App() {
 
   // Lưu về máy rồi xoá trên cloud. Điểm mấu chốt: chỉ xoá đúng những mục đã tải xong
   // (r.saved), mục nào lỗi vẫn nằm nguyên trên cloud — không bao giờ xoá thứ chưa có bản sao.
-  async function handleArchiveItems(items: StorageItem[]): Promise<boolean> {
+  async function handleArchiveItems(items: StorageItem[], folder: string): Promise<boolean> {
     const bytes = items.reduce((s, it) => s + (it.bytes ?? 0), 0);
     const dir = await pickFolder("Chọn thư mục lưu bản sao trước khi xoá");
     if (!dir) return false;
 
+    const sub = archiveFolderName(folder);
     const ok = await askConfirm(
-      `Tải ${items.length} mục (${fmtBytes(bytes)}) về "${dir}" rồi xoá trên cloud? ` +
+      `Tải ${items.length} mục (${fmtBytes(bytes)}) vào thư mục "${sub}" trong "${dir}" rồi xoá trên cloud? ` +
         `Khôi phục lại được từ thư mục này, và mỗi mục sẽ xin lại đúng link chia sẻ cũ.`,
       // Vẫn là hành động phá huỷ (xoá trên cloud) nên giữ nút đỏ, chỉ đổi nhãn cho đúng việc.
       { confirmLabel: "Lưu về máy & xoá", icon: "💾" }
@@ -905,8 +911,11 @@ function App() {
 
     setArchiveProgress({ title: "Đang tải về máy…", done: 0, total: items.length, label: "" });
     try {
-      const r = await archiveItems(dir, items, (p) =>
-        setArchiveProgress({ title: "Đang tải về máy…", ...p })
+      const r = await archiveItems(
+        dir,
+        items,
+        (p) => setArchiveProgress({ title: "Đang tải về máy…", ...p }),
+        folder
       );
 
       if (r.saved.length === 0) {
@@ -981,57 +990,111 @@ function App() {
    * `preset` = khôi phục thẳng từ thư mục đã nhớ, bỏ qua bước chọn thư mục.
    * `onlyIds` = chỉ khôi phục đúng mấy mục đó (nút trên từng dòng trong kho); bỏ trống thì
    * khôi phục cả kho.
+   *
+   * Không có `preset` thì cho chọn NHIỀU thư mục một lượt. Mỗi thư mục được quy về cặp
+   * (gốc kho, phần bên trong): chọn gốc kho thì lấy tất, chọn một thư mục mốc thì chỉ lấy
+   * phần nằm trong nó. Nhờ vậy chọn lẫn lộn gốc kho và thư mục mốc vẫn chạy đúng.
    */
   async function handleRestore(preset?: string, onlyIds?: string[]) {
-    const dir = preset ?? (await pickFolder("Chọn thư mục kho đã lưu trước đó"));
-    if (!dir) return;
+    const picked = preset ? [preset] : await pickFolders("Chọn một hay nhiều thư mục kho / thư mục mốc");
+    if (picked.length === 0) return;
 
     setArchiveProgress({ title: "Đang đọc thư mục…", done: 0, total: 0, label: "" });
     try {
-      const scan = await scanArchive(dir);
-      if (scan.entries.length === 0) {
-        showToast(
-          scan.missing.length > 0
-            ? `Thư mục có danh sách nhưng thiếu file (${scan.missing.length} mục) — không khôi phục được`
-            : "Thư mục này không phải kho lưu trữ của app (thiếu captureshare-archive.json)"
-        );
-        return;
+      // Gộp các thư mục cùng gốc kho lại: chọn cả hai thư mục mốc trong một kho thì chỉ đọc
+      // manifest một lần, và quan trọng hơn là chỉ ghi sổ một lần cho kho đó.
+      const groups = new Map<string, { root: string; entries: ArchiveEntry[]; missing: number }>();
+      const seen = new Set<string>(); // chọn trùng (gốc kho + thư mục con trong nó) → khỏi tải hai lần
+      const notArchive: string[] = [];
+
+      for (const dir of picked) {
+        const found = await resolveArchiveRoot(dir);
+        if (!found) { notArchive.push(dir); continue; }
+        const scan = await scanArchive(found.root, found.prefix);
+        let g = groups.get(found.root);
+        if (!g) { g = { root: found.root, entries: [], missing: 0 }; groups.set(found.root, g); }
+        g.missing += scan.missing.length;
+        for (const e of scan.entries) {
+          if (seen.has(e.id)) continue;
+          seen.add(e.id);
+          g.entries.push(e);
+        }
       }
 
       // Thư mục tự chọn mà đúng là kho thì nhớ luôn — lần sau bấm một phát là xong.
-      await syncArchiveDir(dir);
+      for (const root of groups.keys()) await syncArchiveDir(root);
 
       // Lọc theo id khi bấm khôi phục một dòng. Id có trong sổ nhưng thiếu trong manifest
       // (hoặc file đã bị xoá khỏi thư mục) thì báo rõ, đừng im lặng khôi phục cả kho.
-      const entries = onlyIds ? scan.entries.filter((e) => onlyIds.includes(e.id)) : scan.entries;
+      let entries: ArchiveEntry[] = [];
+      let missingTotal = 0;
+      const plan: { root: string; entries: ArchiveEntry[] }[] = [];
+      for (const g of groups.values()) {
+        const pick = onlyIds ? g.entries.filter((e) => onlyIds.includes(e.id)) : g.entries;
+        missingTotal += g.missing;
+        if (pick.length > 0) plan.push({ root: g.root, entries: pick });
+        entries = entries.concat(pick);
+      }
+
       if (entries.length === 0) {
-        const missing = scan.missing.some((e) => onlyIds?.includes(e.id));
         showToast(
-          missing
-            ? "File của mục này không còn trong thư mục kho — không khôi phục được"
-            : "Không tìm thấy mục này trong sổ của thư mục kho"
+          onlyIds
+            ? (missingTotal > 0
+                ? "File của mục này không còn trong thư mục kho — không khôi phục được"
+                : "Không tìm thấy mục này trong sổ của thư mục kho")
+            : missingTotal > 0
+              ? `Thư mục có danh sách nhưng thiếu file (${missingTotal} mục) — không khôi phục được`
+              : notArchive.length === picked.length
+                ? "Thư mục này không phải kho lưu trữ của app (thiếu captureshare-archive.json)"
+                : "Không có mục nào để khôi phục trong thư mục đã chọn"
         );
         return;
       }
 
       const bytes = entries.reduce((s, e) => s + (e.bytes || 0), 0);
-      const warn = !onlyIds && scan.missing.length > 0 ? ` (${scan.missing.length} mục thiếu file sẽ bỏ qua)` : "";
+      const warn = !onlyIds && missingTotal > 0 ? ` (${missingTotal} mục thiếu file sẽ bỏ qua)` : "";
+      // Chọn nhầm vài thư mục không phải kho thì nói luôn trong hộp thoại, đừng lặng lẽ bỏ qua
+      // rồi để người dùng thắc mắc sao số mục ít hơn mình tưởng.
+      const skip = notArchive.length > 0 ? ` Bỏ qua ${notArchive.length} thư mục không phải kho.` : "";
+      const spread = plan.length > 1 ? ` từ ${plan.length} kho` : "";
       // Khôi phục KHÔNG xoá gì cả — dùng nút xanh "Khôi phục", đừng để nút đỏ ghi "Xoá"
       // làm người dùng tưởng bấm vào là mất dữ liệu rồi không dám bấm.
       const ok = await askConfirm(
         (entries.length === 1
           ? `Khôi phục “${entries[0].title || "(không tiêu đề)"}” (${fmtBytes(bytes)}) lên cloud? `
-          : `Khôi phục ${entries.length} mục (${fmtBytes(bytes)}) lên cloud?${warn} `) +
+          : `Khôi phục ${entries.length} mục${spread} (${fmtBytes(bytes)}) lên cloud?${warn}${skip} `) +
           `Mỗi mục xin lại link chia sẻ cũ; mục nào có id đã bị dùng lại thì nhận link mới. ` +
           `File dưới máy vẫn giữ nguyên.`,
         { confirmLabel: "Khôi phục", icon: "☁️", danger: false }
       );
       if (!ok) return;
 
-      setArchiveProgress({ title: "Đang khôi phục…", done: 0, total: entries.length, label: "" });
-      const r = await restoreEntries(dir, entries, (p) =>
-        setArchiveProgress({ title: "Đang khôi phục…", ...p })
-      );
+      // Chạy lần lượt từng kho nhưng thanh tiến độ tính trên TỔNG: chia theo từng kho thì
+      // thanh sẽ tụt về 0 mỗi lần sang kho mới, nhìn như bị treo giữa chừng.
+      const totalItems = entries.length;
+      const totalBytes = entries.reduce((s, e) => s + (e.bytes || 1_000_000), 0);
+      let doneItems = 0;
+      let doneBytes = 0;
+      const r = { restored: 0, keptLinks: 0, failed: [] as ArchiveFailure[] };
+
+      setArchiveProgress({ title: "Đang khôi phục…", done: 0, total: totalItems, label: "" });
+      for (const g of plan) {
+        const part = await restoreEntries(g.root, g.entries, (p) =>
+          setArchiveProgress({
+            title: "Đang khôi phục…",
+            label: p.label,
+            done: doneItems + p.done,
+            total: totalItems,
+            bytesDone: doneBytes + p.bytesDone,
+            bytesTotal: totalBytes,
+          })
+        );
+        r.restored += part.restored;
+        r.keptLinks += part.keptLinks;
+        r.failed.push(...part.failed);
+        doneItems += g.entries.length;
+        doneBytes += g.entries.reduce((s, e) => s + (e.bytes || 1_000_000), 0);
+      }
 
       const parts = [`Đã khôi phục ${r.restored} mục`];
       // Nói rõ bao nhiêu mục giữ được link cũ: người dùng cần biết link nào còn gửi đi được.
