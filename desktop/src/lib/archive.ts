@@ -18,7 +18,13 @@ export interface ArchiveEntry {
   title: string;
   createdAt: number;
   bytes: number;
-  /** Tên file trong thư mục kho (không kèm đường dẫn → di chuyển cả thư mục vẫn dùng được). */
+  /**
+   * Đường dẫn tương đối tính từ thư mục kho, luôn ghi bằng `/`:
+ * `Tháng 8-2026/2026-08-15/….webp`.
+   * Tương đối chứ không tuyệt đối → bê cả thư mục kho đi đâu vẫn khôi phục được.
+   * Kho lưu từ bản cũ chỉ có tên file phẳng không kèm thư mục; `joinPath` nuốt được cả hai
+   * dạng nên manifest cũ vẫn đọc và khôi phục bình thường.
+   */
   file: string;
   /** Ảnh gốc chưa gộp annotate, có thì khôi phục mới sửa lại khung/ghi chú được. */
   originalFile?: string;
@@ -59,7 +65,8 @@ function pad(n: number): string {
 }
 
 // Windows cấm \ / : * ? " < > | trong tên file; ký tự điều khiển cũng không hợp lệ.
-// Cắt 60 ký tự để đường dẫn tổng không chạm giới hạn 260 ký tự khi thư mục kho nằm sâu.
+// Cắt 60 ký tự để đường dẫn tổng không chạm giới hạn 260 ký tự khi thư mục kho nằm sâu —
+// nhớ là còn thư mục nhãn (tối đa 60) và thư mục ngày (11) ăn thêm ~70 ký tự nữa.
 const FORBIDDEN = '\\/:*?"<>|';
 function safeSegment(s: string): string {
   let out = "";
@@ -71,6 +78,32 @@ function safeSegment(s: string): string {
   return out.replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
+/**
+ * Tên thư mục bọc cả đợt tải, lấy từ nhãn mốc đang hiện trên màn hình ("Tháng 8/2026",
+ * "24/08 – 30/08/2026", "15/08/2026").
+ *
+ * Không dùng `safeSegment` vì nó XOÁ ký tự cấm: "Tháng 9/2026" sẽ thành "Tháng 92026" —
+ * đọc ra một con số khác hẳn. Ở đây `/` và `\` phải đổi thành `-` mới giữ đúng nghĩa ngày
+ * tháng. Windows còn cấm tên thư mục kết thúc bằng dấu chấm hoặc dấu cách nên phải cắt nốt,
+ * và cắt SAU khi giới hạn 60 ký tự (cắt trước thì lát nữa lại lòi ra dấu chấm ở đuôi).
+ */
+export function archiveFolderName(label: string): string {
+  let out = "";
+  for (const ch of label) {
+    if (ch.charCodeAt(0) < 32) continue; // ký tự điều khiển
+    if (ch === "/" || ch === "\\") out += "-";
+    else if (!FORBIDDEN.includes(ch)) out += ch;
+  }
+  out = out.replace(/\s+/g, " ").trim().slice(0, 60).replace(/[. ]+$/, "");
+  return out || "Khac"; // nhãn toàn ký tự cấm vẫn phải có chỗ mà đổ file vào
+}
+
+/** Thư mục con theo ngày tạo của mục: `2026-08-15`. */
+function dayFolder(createdAt: number): string {
+  const d = new Date(createdAt);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 /** Tên file: có ngày giờ để người dùng tự tìm được, có id để không bao giờ trùng nhau. */
 function baseName(item: { id: string; title: string | null; createdAt: number }): string {
   const d = new Date(item.createdAt);
@@ -79,15 +112,26 @@ function baseName(item: { id: string; title: string | null; createdAt: number })
   return title ? `${stamp}_${title}_${item.id}` : `${stamp}_${item.id}`;
 }
 
-function joinPath(dir: string, name: string): string {
+function joinPath(dir: string, rel: string): string {
   const sep = dir.includes("\\") ? "\\" : "/";
-  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+  // `rel` có thể là đường dẫn nhiều cấp (Tháng 8-2026/2026-08-15/anh.webp) vì manifest luôn
+  // ghi bằng `/`. Đổi hết sang dấu phân cách của thư mục gốc rồi mới nối, để khỏi sinh ra
+  // đường dẫn lai kiểu D:\DATA\Tháng 8-2026/2026-08-15/anh.webp.
+  const path = rel.replace(/[\\/]+/g, sep);
+  return dir.endsWith(sep) ? `${dir}${path}` : `${dir}${sep}${path}`;
 }
 
 /** Mở hộp thoại chọn thư mục. null = người dùng bấm huỷ. */
 export async function pickFolder(title: string): Promise<string | null> {
   const picked = await open({ directory: true, multiple: false, title });
   return typeof picked === "string" ? picked : null;
+}
+
+/** Chọn nhiều thư mục một lượt. Mảng rỗng = người dùng bấm huỷ. */
+export async function pickFolders(title: string): Promise<string[]> {
+  const picked = await open({ directory: true, multiple: true, title });
+  if (Array.isArray(picked)) return picked.filter((d): d is string => typeof d === "string");
+  return typeof picked === "string" ? [picked] : [];
 }
 
 /** Tên thư mục cuối trong đường dẫn, để hiện cho gọn thay vì cả đường dẫn dài. */
@@ -155,11 +199,15 @@ async function writeManifest(dir: string, added: ArchiveEntry[]): Promise<number
 /**
  * Tải các mục về thư mục kho. KHÔNG xoá gì trên cloud — bên gọi tự quyết định xoá,
  * và chỉ được xoá đúng những id nằm trong `saved`.
+ *
+ * `folder` là nhãn mốc đang hiện trên màn hình; cả đợt tải sẽ nằm gọn trong một thư mục
+ * mang tên đó. Bỏ trống thì file đổ thẳng vào thư mục kho như trước.
  */
 export async function archiveItems(
   dir: string,
   items: StorageItem[],
-  onProgress: ProgressFn
+  onProgress: ProgressFn,
+  folder?: string
 ): Promise<{ saved: ArchiveEntry[]; failed: ArchiveFailure[]; folderTotal: number }> {
   const saved: ArchiveEntry[] = [];
   const failed: ArchiveFailure[] = [];
@@ -171,12 +219,21 @@ export async function archiveItems(
   const bytesTotal = items.reduce((s, it) => s + guess(it.bytes), 0);
   let bytesDone = 0;
 
+  const root = folder ? archiveFolderName(folder) : "";
+  // Chỉ chẻ thêm cấp ngày khi đợt này trải trên nhiều ngày. Tải nguyên tháng 441 mục thì
+  // rất cần; tải đúng một ngày mà vẫn đẻ thêm thư mục ngày trùng tên thư mục ngoài thì
+  // chỉ tổ lồng nhau vô ích, bấm thêm một nhịp mới thấy file.
+  const spansDays = new Set(items.map((it) => dayFolder(it.createdAt))).size > 1;
+
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
     const label = it.title || "(không tiêu đề)";
     onProgress({ done: i, total: items.length, label, bytesDone, bytesTotal });
     try {
-      const base = baseName(it);
+      // Tiền tố thư mục dính luôn vào `base` → file gộp và ảnh gốc chắc chắn nằm cùng chỗ.
+      const base = [root, spansDays ? dayFolder(it.createdAt) : "", baseName(it)]
+        .filter(Boolean)
+        .join("/");
       const file = `${base}.${it.type === "video" ? "mp4" : "webp"}`;
       const bytes = await invoke<number>("archive_save", {
         url: it.fileUrl,
@@ -221,18 +278,72 @@ export async function archiveItems(
   return { saved, failed, folderTotal };
 }
 
+/** Thư mục cha, hoặc null khi đã chạm gốc ổ đĩa (`D:`) hay gốc hệ thống (`/`). */
+function parentDir(dir: string): string | null {
+  const norm = dir.replace(/[\\/]+$/, "");
+  const cut = Math.max(norm.lastIndexOf("\\"), norm.lastIndexOf("/"));
+  if (cut <= 0) return null;
+  const parent = norm.slice(0, cut);
+  return /^[A-Za-z]:$/.test(parent) ? null : parent || null;
+}
+
+/** Đường đi từ `root` xuống `dir`, viết bằng `/` để so khớp thẳng với `file` trong manifest. */
+function relFrom(root: string, dir: string): string {
+  const r = root.replace(/[\\/]+$/, "");
+  const d = dir.replace(/[\\/]+$/, "");
+  return d.slice(r.length).replace(/^[\\/]+/, "").replace(/[\\/]+/g, "/");
+}
+
+/** Gốc kho (nơi có manifest) và phần thư mục con mà người dùng thực sự chỉ vào. */
+export interface ArchiveRoot {
+  root: string;
+  /** Rỗng = họ chọn thẳng gốc kho, khôi phục tất cả. */
+  prefix: string;
+}
+
+// Đi ngược tối đa mấy cấp để tìm manifest. Cấu trúc sâu nhất hiện nay là
+// <gốc kho>/<nhãn mốc>/<ngày>/ nên 3 cấp là đủ; để rộng thêm một nhịp cho chắc.
+const MAX_WALK_UP = 4;
+
+/**
+ * Nhận diện thư mục người dùng chọn. Chọn thẳng gốc kho thì trả về chính nó; chọn một thư
+ * mục mốc bên trong (`D:\DATA\27-07 – 02-08-2026`) thì đi ngược lên tìm manifest
+ * ở `D:\DATA` rồi nhớ lại phần đường còn thừa, để chỉ khôi phục đúng nội dung
+ * nằm trong thư mục họ chỉ vào.
+ *
+ * Có bước này vì manifest CỐ TÌNH chỉ có một bản ở gốc kho: nhiều đợt lưu gộp chung một sổ
+ * thì mới biết được thư mục đang giữ tổng cộng những gì. Không dò ngược thì người dùng chọn
+ * đúng thư mục mốc lại bị báo "không phải kho lưu trữ" — đúng thư mục app vừa tự tạo ra.
+ */
+export async function resolveArchiveRoot(dir: string): Promise<ArchiveRoot | null> {
+  let cur: string | null = dir;
+  for (let up = 0; cur && up <= MAX_WALK_UP; up++) {
+    if ((await readManifest(cur)).length > 0) return { root: cur, prefix: relFrom(cur, dir) };
+    cur = parentDir(cur);
+  }
+  return null;
+}
+
 export interface ArchiveScan {
   entries: ArchiveEntry[];
   /** Mục có trong manifest nhưng file đã bị xoá/đổi tên → không khôi phục được. */
   missing: ArchiveEntry[];
 }
 
-/** Đọc kho trong thư mục và đối chiếu xem file còn đủ không. */
-export async function scanArchive(dir: string): Promise<ArchiveScan> {
+/**
+ * Đọc kho trong thư mục và đối chiếu xem file còn đủ không.
+ *
+ * `prefix` (vd `Tháng 8-2026`) = chỉ lấy các mục nằm trong thư mục con đó. Dùng khi người
+ * dùng chọn thẳng một thư mục mốc: manifest nằm ở gốc kho nên vẫn phải đọc từ gốc, nhưng
+ * chỉ được khôi phục đúng phần bên trong thư mục họ chỉ vào.
+ */
+export async function scanArchive(dir: string, prefix = ""): Promise<ArchiveScan> {
   const all = await readManifest(dir);
+  const want = prefix ? `${prefix.replace(/[\/]+$/, "")}/` : "";
   const entries: ArchiveEntry[] = [];
   const missing: ArchiveEntry[] = [];
   for (const e of all) {
+    if (want && !e.file.replace(/[\/]+/g, "/").startsWith(want)) continue;
     const size = await invoke<number | null>("archive_file_size", { path: joinPath(dir, e.file) });
     if (size && size > 0) entries.push(e);
     else missing.push(e);

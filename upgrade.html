@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cải tiến chức năng — Chụp &amp; Chia sẻ</title>
+<style>
+  :root{
+    --bg:#f7f8fa; --card:#ffffff; --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb;
+    --hi:#4f46e5; --hi-soft:#eef2ff;
+    --p1:#dc2626; --p1-soft:#fef2f2;
+    --p2:#d97706; --p2-soft:#fffbeb;
+    --p3:#059669; --p3-soft:#ecfdf5;
+    --done:#059669;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1115; --card:#171a21; --ink:#e5e7eb; --muted:#9aa1ac; --line:#262b34;
+      --hi:#a5b4fc; --hi-soft:#1e2130;
+      --p1:#f87171; --p1-soft:#241a1c;
+      --p2:#fbbf24; --p2-soft:#241f18;
+      --p3:#34d399; --p3-soft:#152420;
+      --done:#34d399;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; padding:40px 20px 80px; background:var(--bg); color:var(--ink);
+    font-family:"Segoe UI",system-ui,-apple-system,"Noto Sans",sans-serif;
+    font-size:15px; line-height:1.65;
+  }
+  .wrap{max-width:880px;margin:0 auto}
+  header{margin-bottom:28px}
+  h1{font-size:27px;line-height:1.25;margin:0 0 8px}
+  .sub{color:var(--muted);font-size:13.5px;margin:0}
+  .sub b{color:var(--ink)}
+  h2{font-size:17px;margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h3{font-size:15.5px;margin:0 0 10px}
+  p{margin:0 0 10px}
+  code{
+    font-family:ui-monospace,Consolas,"Cascadia Mono",monospace;font-size:12.5px;
+    background:var(--hi-soft);color:var(--hi);border-radius:5px;padding:1px 5px;
+  }
+  .card{
+    background:var(--card);border:1px solid var(--line);border-left:3px solid var(--line);
+    border-radius:10px;padding:16px 18px;margin-bottom:12px;
+  }
+  .card--p1{border-left-color:var(--p1)}
+  .card--p2{border-left-color:var(--p2)}
+  .card--p3{border-left-color:var(--p3)}
+  .card-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .num{color:var(--muted);font-size:13px;font-weight:700;min-width:20px}
+  .tags{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+  .tag{font-size:11px;font-weight:600;border-radius:999px;padding:2px 9px;white-space:nowrap}
+  .tag--p1{background:var(--p1-soft);color:var(--p1)}
+  .tag--p2{background:var(--p2-soft);color:var(--p2)}
+  .tag--p3{background:var(--p3-soft);color:var(--p3)}
+  .tag--dif{background:var(--hi-soft);color:var(--hi)}
+  .row{display:grid;grid-template-columns:76px 1fr;gap:10px;align-items:start;margin-top:8px}
+  .row-k{font-size:12px;font-weight:700;color:var(--muted);padding-top:2px}
+  .row-v{font-size:14px}
+  ul{margin:4px 0 0;padding-left:20px}
+  li{margin-bottom:3px}
+  .done-list{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+  .done-list ul{list-style:none;padding:0;margin:0;columns:2;column-gap:26px}
+  .done-list li{padding-left:20px;position:relative;break-inside:avoid;font-size:13.5px}
+  .done-list li::before{content:"✓";position:absolute;left:0;color:var(--done);font-weight:700}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;background:var(--card);
+    border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line)}
+  th{background:var(--hi-soft);color:var(--hi);font-size:12px;text-transform:uppercase;letter-spacing:.03em}
+  tr:last-child td{border-bottom:none}
+  .phase{display:grid;grid-template-columns:120px 1fr;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
+  .phase:last-child{border-bottom:none}
+  .phase-k{font-weight:700;font-size:13.5px;color:var(--hi)}
+  .note{font-size:13px;color:var(--muted);margin-top:26px;padding-top:14px;border-top:1px solid var(--line)}
+  @media (max-width:640px){
+    .done-list ul{columns:1}
+    .row,.phase{grid-template-columns:1fr;gap:2px}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Cải tiến chức năng — Chụp &amp; Chia sẻ</h1>
+  <p class="sub">
+    Bản đề xuất cho phiên bản hiện tại <b>0.5.1</b> · lập ngày <b>20/08/2026</b> ·
+    thay cho <code>de_xuat_chuc_nang.md</code> (04/07/2026) đã lỗi thời.
+    Mỗi mục nêu <b>vấn đề đang có thật trong code</b>, cách sửa, và việc cần làm ở đâu.
+  </p>
+</header>
+
+<h2>Đã làm xong từ bản đề xuất cũ</h2>
+<div class="done-list">
+  <ul>
+    <li>Che mờ vùng riêng tư</li>
+    <li>Tô sáng, bút vẽ tay, đo kích thước, hút màu</li>
+    <li>Hoàn tác / làm lại (Ctrl+Z, Ctrl+Y)</li>
+    <li>Cắt video trước khi lưu</li>
+    <li>Chọn nhiều mục để xoá cả loạt</li>
+    <li>Tìm theo tiêu đề trong thư viện</li>
+    <li>Tra theo id / link / tiêu đề ở Quản lý dữ liệu</li>
+    <li>Tự copy link sau khi lưu</li>
+    <li>Khởi động cùng Windows</li>
+    <li>Đóng cửa sổ thì thu xuống khay</li>
+    <li>Tự cập nhật qua GitHub Releases</li>
+    <li>Dọn dữ liệu cũ + sao lưu / khôi phục</li>
+  </ul>
+</div>
+
+<h2>Ưu tiên cao</h2>
+
+<div class="card card--p1">
+  <div class="card-top">
+    <span class="num">01</span>
+    <h3>Kiểm soát link chia sẻ: hết hạn · mật khẩu · thu hồi</h3>
+    <div class="tags"><span class="tag tag--p1">Ưu tiên cao</span><span class="tag tag--dif">Khó vừa</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Mọi link <code>/v/&lt;id&gt;</code> đang công khai vĩnh viễn. Lỡ gửi nhầm thì cách duy nhất
+    là xoá hẳn nội dung — không có cách nào ngắt link mà vẫn giữ file.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    <ul>
+      <li>Đặt hạn dùng khi lưu: 1 giờ / 1 ngày / 7 ngày / vĩnh viễn</li>
+      <li>Đặt mật khẩu cho link, người nhận nhập mới xem được</li>
+      <li>Nút “Ngừng chia sẻ” trong Thư viện — chặn link nhưng giữ nguyên file</li>
+      <li>Tuỳ chọn xem một lần rồi tự huỷ</li>
+    </ul>
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Thêm cột <code>expires_at</code>, <code>password_hash</code>, <code>revoked</code>,
+    <code>view_once</code> vào bảng <code>items</code>; chặn ở cả ba đường ra
+    <code>/v/</code>, <code>/file/</code>, <code>/orig/</code> — chặn thiếu một đường là hở.
+    Giao diện đặt ở màn hình kết quả sau khi lưu và trong Thư viện.
+  </div></div>
+</div>
+
+<div class="card card--p1">
+  <div class="card-top">
+    <span class="num">02</span>
+    <h3>Chụp xong copy thẳng vào clipboard, không cần đăng lên</h3>
+    <div class="tags"><span class="tag tag--p1">Ưu tiên cao</span><span class="tag tag--dif">Dễ</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Nhiều lúc chỉ cần dán ảnh vào Zalo / chat / mail, nhưng luồng hiện tại buộc phải tải
+    lên cloud rồi mới có cái để chia sẻ — tốn dung lượng cho thứ dùng một lần.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    <ul>
+      <li>Một phím tắt riêng: chụp → ảnh vào clipboard → xong, không mở app</li>
+      <li>Trong trình chỉnh sửa thêm nút “Copy ảnh” cạnh nút Lưu</li>
+      <li>Chọn dạng copy link: link thuần, Markdown, hoặc thẻ <code>&lt;img&gt;</code></li>
+    </ul>
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Dùng hàm ghi ảnh của plugin clipboard đã cài sẵn; thêm một phím tắt trong Cài đặt và
+    một tuỳ chọn “dạng copy link”.
+  </div></div>
+</div>
+
+<div class="card card--p1">
+  <div class="card-top">
+    <span class="num">03</span>
+    <h3>Chụp và quay được màn hình phụ</h3>
+    <div class="tags"><span class="tag tag--p1">Ưu tiên cao</span><span class="tag tag--dif">Khó vừa</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Hàm chụp đang lấy đúng màn hình chính (<code>capture.rs</code> — tìm màn hình
+    <code>is_primary</code>, không có thì lấy cái đầu tiên). Ai dùng hai màn hình thì
+    bấm phím tắt lúc đang làm việc ở màn phụ sẽ ra ảnh của màn kia.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Chụp màn hình <b>đang chứa con trỏ chuột</b>, và cho phép chọn màn hình trong Cài đặt.
+    Khung chọn vùng cũng phải trải được sang màn phụ.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Đọc vị trí chuột rồi đối chiếu với danh sách màn hình để chọn đúng cái;
+    cửa sổ chọn vùng mở theo toạ độ của màn hình đó.
+  </div></div>
+</div>
+
+<div class="card card--p1">
+  <div class="card-top">
+    <span class="num">04</span>
+    <h3>Tìm kiếm không dấu, không phân biệt hoa thường</h3>
+    <div class="tags"><span class="tag tag--p1">Ưu tiên cao</span><span class="tag tag--dif">Dễ</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Tra theo tiêu đề đang so khớp thẳng chuỗi có dấu, nên gõ “khai thue” không ra
+    “Khai thuế”, gõ “THUẾ” cũng không ra “thuế”. Người tìm lại nội dung cũ hay gõ vội,
+    không bỏ dấu.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Lưu thêm một bản tiêu đề đã bỏ dấu và hạ chữ thường, rồi tìm trên bản đó.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Thêm cột <code>title_norm</code> cho bảng nội dung và cho sổ kho, ghi lúc lưu và lúc
+    đổi tiêu đề; chạy một lượt cập nhật cho dữ liệu cũ. Sửa <code>/api/search</code>
+    tìm trên cột mới.
+  </div></div>
+</div>
+
+<h2>Ưu tiên trung bình</h2>
+
+<div class="card card--p2">
+  <div class="card-top">
+    <span class="num">05</span>
+    <h3>Thùng rác + tự dọn theo lịch</h3>
+    <div class="tags"><span class="tag tag--p2">Ưu tiên vừa</span><span class="tag tag--dif">Khó vừa</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Xoá là mất luôn, bấm nhầm không lấy lại được (trừ khi đã sao lưu về máy).
+    Và việc dọn dữ liệu cũ vẫn phải nhớ mở app bấm tay.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Xoá mềm vào thùng rác, sau 30 ngày mới xoá thật. Thêm tuỳ chọn tự dọn nội dung
+    quá hạn chạy nền, không cần mở app.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Cột <code>deleted_at</code>, lọc bỏ mục đã xoá mềm ở mọi chỗ liệt kê,
+    thêm lịch chạy định kỳ cho worker để quét và dọn.
+  </div></div>
+</div>
+
+<div class="card card--p2">
+  <div class="card-top">
+    <span class="num">06</span>
+    <h3>Nhãn màu và đánh dấu sao trong Thư viện</h3>
+    <div class="tags"><span class="tag tag--p2">Ưu tiên vừa</span><span class="tag tag--dif">Khó vừa</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Thư viện mới lọc được theo thời gian, loại và tiêu đề. Nội dung nhiều lên thì
+    những thứ hay dùng lại bị trôi mất giữa đống ảnh chụp một lần rồi thôi.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Gắn nhãn (lỗi, hoá đơn, thiết kế…) và đánh dấu sao; lọc nhanh theo nhãn hoặc
+    “chỉ xem mục có sao”.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Cột <code>tags</code> và <code>starred</code> cho bảng nội dung;
+    <code>/api/items</code> nhận thêm tham số lọc; hàng nhãn trong Thư viện.
+  </div></div>
+</div>
+
+<div class="card card--p2">
+  <div class="card-top">
+    <span class="num">07</span>
+    <h3>Quay video có tiếng</h3>
+    <div class="tags"><span class="tag tag--p2">Ưu tiên vừa</span><span class="tag tag--dif">Khó vừa</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Video quay ra hiện không có âm thanh — lệnh ffmpeg chỉ lấy hình. Quay hướng dẫn
+    cho người khác xem mà không nói được thì phải chú thích bù bằng chữ.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Cho chọn nguồn tiếng: micro, âm thanh hệ thống, cả hai, hoặc tắt tiếng.
+    Nhớ lựa chọn lần trước, và hiện mức tín hiệu để biết micro có ăn không.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Thêm đầu vào âm thanh cho ffmpeg và một ô chọn nguồn trong Cài đặt.
+  </div></div>
+</div>
+
+<div class="card card--p2">
+  <div class="card-top">
+    <span class="num">08</span>
+    <h3>Chọn chất lượng video và xuất GIF</h3>
+    <div class="tags"><span class="tag tag--p2">Ưu tiên vừa</span><span class="tag tag--dif">Khó vừa</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Thông số quay đang cố định (24 hình/giây, nén nhanh, mức 28) — không đổi được.
+    Clip vài giây cũng ra file nặng, mà dung lượng cloud thì có hạn.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Ba mức chất lượng dựng sẵn (nhẹ / vừa / nét) kèm ước tính dung lượng, và
+    nút “Xuất GIF” cho clip ngắn để dán thẳng vào chat.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Đưa thông số nén thành cấu hình đọc từ Cài đặt; thêm lệnh chuyển GIF cho ffmpeg
+    (dựng bảng màu trước rồi mới xuất, không thì GIF vỡ màu).
+  </div></div>
+</div>
+
+<div class="card card--p2">
+  <div class="card-top">
+    <span class="num">09</span>
+    <h3>Copy chữ trong ảnh</h3>
+    <div class="tags"><span class="tag tag--p2">Ưu tiên vừa</span><span class="tag tag--dif">Khó</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Chụp mã lỗi, số tài khoản, đoạn chữ không bôi đen được — rồi vẫn phải gõ tay lại.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Nút “Copy chữ trong ảnh” trong trình chỉnh sửa, đọc được tiếng Việt.
+    App đã quét được mã QR trong ảnh nên đường đi này không lạ.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Gọi bộ nhận chữ có sẵn của Windows từ phần Rust — chạy ngay trên máy,
+    không cần mạng, không tốn hạn mức Cloudflare.
+  </div></div>
+</div>
+
+<div class="card card--p2">
+  <div class="card-top">
+    <span class="num">10</span>
+    <h3>Cắt ảnh trong trình chỉnh sửa</h3>
+    <div class="tags"><span class="tag tag--p2">Ưu tiên vừa</span><span class="tag tag--dif">Dễ</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Chụp lỡ rộng thì phải chụp lại — trong trình chỉnh sửa không cắt bớt được.
+  </div></div>
+  <div class="row"><div class="row-k">Đề xuất</div><div class="row-v">
+    Công cụ cắt với khung kéo được, giữ Shift để cắt theo tỉ lệ.
+    Cắt xong vẫn hoàn tác được như mọi thao tác khác.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Thêm công cụ cắt vào thanh công cụ; lúc xuất ảnh thì cắt cả ảnh gốc theo đúng khung,
+    nếu không người tải ảnh gốc vẫn thấy phần đã cắt bỏ.
+  </div></div>
+</div>
+
+<h2>Ưu tiên thấp</h2>
+
+<div class="card card--p3">
+  <div class="card-top">
+    <span class="num">11</span>
+    <h3>Giao diện tối</h3>
+    <div class="tags"><span class="tag tag--p3">Ưu tiên thấp</span><span class="tag tag--dif">Dễ</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Giao diện chỉ có nền sáng, chói mắt khi làm việc buổi tối; app lại thường trực trong khay.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Gom màu về biến CSS rồi thêm bộ màu tối, theo cài đặt của Windows hoặc cho chọn tay.
+  </div></div>
+</div>
+
+<div class="card card--p3">
+  <div class="card-top">
+    <span class="num">12</span>
+    <h3>Mất mạng vẫn giữ được nội dung vừa chụp</h3>
+    <div class="tags"><span class="tag tag--p3">Ưu tiên thấp</span><span class="tag tag--dif">Khó vừa</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Lưu lên cloud có thử lại vài lần, nhưng mạng hỏng lâu thì coi như mất công chụp.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Hàng đợi dưới máy: giữ tạm file và tiêu đề, có mạng thì tự gửi tiếp,
+    kèm chỗ xem “đang chờ gửi”.
+  </div></div>
+</div>
+
+<div class="card card--p3">
+  <div class="card-top">
+    <span class="num">13</span>
+    <h3>Chụp trang dài phải cuộn</h3>
+    <div class="tags"><span class="tag tag--p3">Ưu tiên thấp</span><span class="tag tag--dif">Khó</span></div>
+  </div>
+  <div class="row"><div class="row-k">Vấn đề</div><div class="row-v">
+    Trang web hay bảng dữ liệu dài hơn màn hình thì phải chụp nhiều lần rồi ghép tay.
+  </div></div>
+  <div class="row"><div class="row-k">Cần làm</div><div class="row-v">
+    Chụp liên tiếp trong lúc cuộn rồi ghép các tấm theo phần trùng nhau.
+    Nên làm sau cùng vì dễ sai khi trang có hiệu ứng động.
+  </div></div>
+</div>
+
+<h2>Bảng tổng hợp</h2>
+<table>
+  <thead>
+    <tr><th>#</th><th>Chức năng</th><th>Ưu tiên</th><th>Độ khó</th><th>Chạm vào</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>01</td><td>Kiểm soát link chia sẻ</td><td>Cao</td><td>Khó vừa</td><td>Worker + dữ liệu + app</td></tr>
+    <tr><td>02</td><td>Copy ảnh thẳng, không đăng lên</td><td>Cao</td><td>Dễ</td><td>App</td></tr>
+    <tr><td>03</td><td>Màn hình phụ</td><td>Cao</td><td>Khó vừa</td><td>Rust</td></tr>
+    <tr><td>04</td><td>Tìm không dấu</td><td>Cao</td><td>Dễ</td><td>Worker + dữ liệu</td></tr>
+    <tr><td>05</td><td>Thùng rác + tự dọn</td><td>Vừa</td><td>Khó vừa</td><td>Worker + dữ liệu</td></tr>
+    <tr><td>06</td><td>Nhãn và đánh dấu sao</td><td>Vừa</td><td>Khó vừa</td><td>Worker + dữ liệu + app</td></tr>
+    <tr><td>07</td><td>Quay có tiếng</td><td>Vừa</td><td>Khó vừa</td><td>Rust + ffmpeg</td></tr>
+    <tr><td>08</td><td>Chất lượng video + GIF</td><td>Vừa</td><td>Khó vừa</td><td>Rust + ffmpeg</td></tr>
+    <tr><td>09</td><td>Copy chữ trong ảnh</td><td>Vừa</td><td>Khó</td><td>Rust</td></tr>
+    <tr><td>10</td><td>Cắt ảnh</td><td>Vừa</td><td>Dễ</td><td>App</td></tr>
+    <tr><td>11</td><td>Giao diện tối</td><td>Thấp</td><td>Dễ</td><td>App</td></tr>
+    <tr><td>12</td><td>Hàng đợi khi mất mạng</td><td>Thấp</td><td>Khó vừa</td><td>App</td></tr>
+    <tr><td>13</td><td>Chụp trang dài</td><td>Thấp</td><td>Khó</td><td>Rust + app</td></tr>
+  </tbody>
+</table>
+
+<h2>Nên làm theo thứ tự nào</h2>
+<div class="card">
+  <div class="phase">
+    <div class="phase-k">Đợt 1 — nhanh</div>
+    <div>Mục 02, 04, 10 — ít code, dùng được ngay, không đụng tới cấu trúc dữ liệu.</div>
+  </div>
+  <div class="phase">
+    <div class="phase-k">Đợt 2 — đáng giá nhất</div>
+    <div>Mục 01 và 05 — bịt rủi ro lộ link và bấm nhầm nút xoá. Hai mục này đều thêm cột
+      vào cùng một bảng, làm chung một lượt thì chỉ phải cập nhật dữ liệu một lần.</div>
+  </div>
+  <div class="phase">
+    <div class="phase-k">Đợt 3 — dùng lâu dài</div>
+    <div>Mục 03, 06, 07, 08 — hợp lý khi đã dùng thường xuyên và nội dung nhiều lên.</div>
+  </div>
+  <div class="phase">
+    <div class="phase-k">Đợt 4 — để sau</div>
+    <div>Mục 09, 11, 12, 13 — hay, nhưng chưa có thì vẫn dùng tốt.</div>
+  </div>
+</div>
+
+<p class="note">
+  Mọi thay đổi dữ liệu ở đây đều là <b>thêm cột mới</b>, không sửa cột cũ — dữ liệu đang có
+  giữ nguyên, bản app cũ vẫn chạy được với worker mới.
+  Riêng mục 01 và 10 có chỗ dễ hở: chặn link phải chặn cả đường tải ảnh gốc, cắt ảnh phải
+  cắt cả ảnh gốc — làm thiếu thì nhìn bề ngoài vẫn tưởng xong.
+</p>
+
+</div>
+</body>
+</html>

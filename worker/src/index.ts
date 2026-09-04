@@ -13,6 +13,7 @@
 //   GET    /api/storage/items    danh sách nội dung trong một khoảng thời gian (kèm dung lượng)
 //   POST   /api/storage/sync     đối chiếu dung lượng thật trên R2 + tìm file rác
 //   POST   /api/storage/purge    xoá hàng loạt theo id / khoảng thời gian / file rác
+//   GET    /api/search           tìm theo tiêu đề (cả mục còn sống lẫn đã lưu về máy)
 //   GET    /api/items/:id        chi tiết (kèm annotations)
 //   PATCH  /api/items/:id        sửa: thay ảnh đã gộp + annotations
 //   DELETE /api/items/:id        xoá: xoá file R2 + bản ghi D1
@@ -699,6 +700,93 @@ const routes = {
           archivedAt: r.archived_at,
           file: r.file,
         })),
+      });
+    }
+
+
+    // ---------- Tra theo tiêu đề ----------
+    // Tìm cả mục còn sống (bảng items) lẫn mục đã xoá nhưng còn bản sao dưới máy (sổ kho),
+    // rồi gộp theo id để mỗi mục chỉ hiện một lần — trả về đúng khuôn kết quả tra theo id.
+    if (req.method === "GET" && path === "/api/search") {
+      if (!(await authed(req, env))) return json({ error: "Không có quyền" }, 401);
+      await ensureBytesColumn(env);
+      await ensureArchiveTables(env);
+
+      const q = (url.searchParams.get("q") || "").trim();
+      if (q.length < 2) return json({ error: "Cần ít nhất 2 ký tự để tìm" }, 400);
+      const limitRaw = Number(url.searchParams.get("limit"));
+      const limit = Math.max(1, Math.min(200, Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : 50));
+      // % và _ trong chuỗi người dùng gõ phải hiểu là ký tự thường, không phải ký tự đại diện.
+      const like = `%${q.replace(/[!%_]/g, (c) => "!" + c)}%`;
+
+      type LiveRow = { id: string; type: string; title: string | null; created_at: number; bytes: number | null };
+      type CopyRow = {
+        item_id: string; store_id: string; type: string; title: string | null;
+        bytes: number | null; created_at: number | null; archived_at: number | null;
+        file: string | null; device: string; dir: string;
+      };
+      const [liveRes, copyRes] = await Promise.all([
+        env.DB.prepare(
+          `SELECT id, type, title, created_at, bytes FROM items
+            WHERE title LIKE ? ESCAPE '!'
+            ORDER BY created_at DESC LIMIT ?`
+        )
+          .bind(like, limit + 1) // lấy dư 1 để biết có bị cắt bớt hay không
+          .all<LiveRow>(),
+        env.DB.prepare(
+          `SELECT ai.*, s.device, s.dir FROM archive_items ai
+             JOIN archive_stores s ON s.id = ai.store_id
+            WHERE ai.title LIKE ? ESCAPE '!'
+            ORDER BY ai.created_at DESC LIMIT ?`
+        )
+          .bind(like, limit * 4) // một mục có thể nằm ở nhiều kho → lấy dư rồi mới gộp
+          .all<CopyRow>(),
+      ]);
+
+      const found = new Map<
+        string,
+        { id: string; createdAt: number; live: unknown | null; copies: unknown[] }
+      >();
+      for (const r of liveRes.results || []) {
+        found.set(r.id, {
+          id: r.id,
+          createdAt: r.created_at,
+          live: {
+            id: r.id,
+            type: r.type,
+            title: r.title,
+            createdAt: r.created_at,
+            bytes: r.bytes,
+            url: `${url.origin}/v/${r.id}`,
+          },
+          copies: [],
+        });
+      }
+      for (const r of copyRes.results || []) {
+        let hit = found.get(r.item_id);
+        if (!hit) {
+          hit = { id: r.item_id, createdAt: r.created_at ?? 0, live: null, copies: [] };
+          found.set(r.item_id, hit);
+        }
+        hit.copies.push({
+          itemId: r.item_id,
+          storeId: r.store_id,
+          device: r.device,
+          dir: r.dir,
+          type: r.type,
+          title: r.title,
+          bytes: r.bytes,
+          createdAt: r.created_at,
+          archivedAt: r.archived_at,
+          file: r.file,
+        });
+      }
+
+      const results = [...found.values()].sort((a, b) => b.createdAt - a.createdAt);
+      return json({
+        q,
+        truncated: results.length > limit,
+        results: results.slice(0, limit).map(({ id, live, copies }) => ({ id, live, copies })),
       });
     }
 

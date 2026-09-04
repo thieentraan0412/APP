@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import type { Tool } from "../types";
 import {
-  IconArrow, IconBlur, IconBox, IconCaret, IconEllipse, IconEyedrop, IconHighlight,
+  IconArrow, IconBlur, IconBox, IconCaret, IconDownload, IconEllipse, IconEyedrop, IconHighlight,
   IconLine, IconMeasure, IconMore, IconNote, IconPen, IconQr, IconRedo, IconSelect,
   IconStep, IconTrash, IconUndo,
 } from "./icons";
@@ -66,6 +66,9 @@ interface Props {
   title: string;
   setTitle: (t: string) => void;
   onScanQr: () => void;
+  /** Xuất ảnh (đã gộp chú thích) ra file trên máy — không đăng lên cloud */
+  onSaveLocal: () => void;
+  savingLocal: boolean;
   onUndo: () => void;
   onRedo: () => void;
   canUndo: boolean;
@@ -132,6 +135,7 @@ function useDismiss(open: boolean, close: () => void) {
 export function Toolbar(props: Props) {
   const {
     tool, setTool, onDelete, canDelete, deleteCount, onBack, onSave, saving, title, setTitle, onScanQr,
+    onSaveLocal, savingLocal,
     onUndo, onRedo, canUndo, canRedo,
     highlightColor, setHighlightColor, highlightThickness, setHighlightThickness,
     highlightOpacity, setHighlightOpacity, showHighlightOptions, editingSelected,
@@ -309,6 +313,11 @@ export function Toolbar(props: Props) {
               >
                 <IconEyedrop />
                 Hút màu
+              </button>
+              <div className="tb-menu-sep" />
+              <button onClick={() => runMore(onSaveLocal)} disabled={savingLocal} title="Lưu file ảnh xuống máy, không đăng lên cloud">
+                <IconDownload />
+                {savingLocal ? "Đang lưu…" : "Lưu về máy"}
               </button>
             </div>
           )}

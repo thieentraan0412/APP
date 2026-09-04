@@ -8,6 +8,13 @@ import { nanoid } from "nanoid";
 import jsQR from "jsqr";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+
+/** 5 -> "05" (dựng mốc thời gian cho tên file lưu về máy) */
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
 
 type ClipItem =
   | { kind: "box"; data: Box }
@@ -64,6 +71,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   const selectedId = selectedIds.length === 1 ? selectedIds[0] : null;
   const [saving, setSaving] = useState(false);
   const [copyMsg, setCopyMsg] = useState<string | null>(null);
+  const [savingLocal, setSavingLocal] = useState(false);
   const [title, setTitle] = useState(initialTitle ?? "");
   // Kích thước vùng canvas, do ResizeObserver đo được (0 = chưa đo lần nào)
   const [area, setArea] = useState({ w: 0, h: 0 });
@@ -486,6 +494,13 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
   // Ẩn khung chọn (Transformer) tạm thời để không bị vẽ vào ảnh — nhưng KHÔNG bỏ chọn
   // để người dùng giữ nguyên phần tử đang chọn.
   function buildFlattenedPng(): Blob | null {
+    const dataUrl = buildFlattenedPngDataUrl();
+    return dataUrl ? dataUrlToBlob(dataUrl) : null;
+  }
+
+  /** Như trên nhưng trả thẳng data URL — lưu ra máy cần chuỗi base64, đổi sang Blob rồi
+   *  mã hoá ngược lại là thừa một vòng với ảnh vài MB. */
+  function buildFlattenedPngDataUrl(): string | null {
     const stage = stageRef.current;
     if (!stage || !img) return null;
     const tr = stage.findOne("Transformer") as Konva.Transformer | undefined;
@@ -499,8 +514,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     if (tr || overlays.length) stage.getLayers().forEach((l) => l.batchDraw());
     try {
       const pixelRatio = 1 / fit.scale; // xuất đúng độ phân giải gốc
-      const dataUrl = stage.toDataURL({ mimeType: "image/png", pixelRatio });
-      return dataUrlToBlob(dataUrl);
+      return stage.toDataURL({ mimeType: "image/png", pixelRatio });
     } finally {
       if (tr && trVisible) tr.visible(true);
       overlays.forEach((n) => n.visible(true));
@@ -518,6 +532,34 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       setCopyMsg("Copy thất bại");
     } finally {
       window.setTimeout(() => setCopyMsg(null), 1800);
+    }
+  }
+
+  /** Lưu ảnh (đã gộp chú thích) thành file trên máy, KHÔNG đăng lên cloud và không cấp
+   *  link. Dùng cho lúc chỉ cần cái file: đính vào mail, gửi Zalo, kẹp vào tài liệu. */
+  async function saveToDisk() {
+    if (savingLocal) return;
+    const dataUrl = buildFlattenedPngDataUrl();
+    if (!dataUrl) return;
+    setSavingLocal(true);
+    try {
+      // Tiêu đề thành tên file, bỏ các ký tự Windows không cho đặt tên; trống thì lấy
+      // mốc thời gian để hai lần lưu liên tiếp không đè lên nhau.
+      const clean = title.trim().replace(/[<>:"/\\|?*]/g, "-").replace(/\s+/g, " ").slice(0, 60).trim();
+      const d = new Date();
+      const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
+      const dst = await saveDialog({
+        defaultPath: `${clean || "anh-chup"}-${stamp}.png`,
+        filters: [{ name: "Ảnh PNG", extensions: ["png"] }],
+      });
+      if (!dst) return; // người dùng bấm Huỷ — không phải lỗi, đừng báo gì
+      await invoke("save_image_to_path", { dataUrl, dst });
+      setCopyMsg("Đã lưu ảnh về máy ✓");
+    } catch (err) {
+      setCopyMsg("Lưu thất bại: " + String(err));
+    } finally {
+      setSavingLocal(false);
+      window.setTimeout(() => setCopyMsg(null), 2200);
     }
   }
 
@@ -669,6 +711,8 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
         title={title}
         setTitle={setTitle}
         onScanQr={scanQr}
+        onSaveLocal={saveToDisk}
+        savingLocal={savingLocal}
         onUndo={undo}
         onRedo={redo}
         canUndo={canUndo}

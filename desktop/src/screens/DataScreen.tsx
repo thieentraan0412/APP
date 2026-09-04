@@ -5,6 +5,8 @@ import {
   getArchivedItems,
   lookupId,
   parseItemId,
+  searchTitle,
+  type FoundItem,
   type IdLookup,
   type StorageItem,
   type StorageItemsPage,
@@ -28,10 +30,11 @@ interface Props {
   onPurgeRange: (from: number, to: number, label: string, items: number, bytes: number) => Promise<boolean>;
   onPurgeIds: (ids: string[], bytes: number) => Promise<boolean>;
   /** Tải các mục đã chọn về máy rồi mới xoá trên cloud. true = đã xoá xong */
-  onArchiveItems: (items: StorageItem[]) => Promise<boolean>;
+  onArchiveItems: (items: StorageItem[], folder: string) => Promise<boolean>;
   /** Đọc một thư mục kho dưới máy và tải các mục trong đó lên lại.
    *  Truyền `dir` để khôi phục thẳng từ thư mục đã nhớ, bỏ qua hộp thoại chọn thư mục. */
-  onRestore: (dir?: string) => void;
+  /** Bỏ trống `ids` = khôi phục cả kho; truyền vào = chỉ mấy mục đó */
+  onRestore: (dir?: string, ids?: string[]) => void;
   /** Sổ kho dùng chung mọi máy (lấy từ cloud), mới cập nhật nhất xếp trước */
   archiveStores: ArchiveStore[];
   /** Tên máy hiện tại — để phân biệt kho ngay tại đây với kho ở máy khác */
@@ -256,6 +259,100 @@ function CutoffDate({ value, onChange }: { value: string; onChange: (iso: string
   );
 }
 
+/** Một kết quả tra được — dùng chung cho tra theo id lẫn tìm theo tiêu đề. */
+function FoundCard({
+  found,
+  device,
+  onOpenArchiveDir,
+}: {
+  found: FoundItem;
+  device: string;
+  onOpenArchiveDir: (dir: string) => void;
+}) {
+  return (
+    <div className="data-found">
+      <div className={`data-found-head data-found-head--${found.live ? "live" : "gone"}`}>
+        <span className="data-found-dot" />
+        <b>
+          {found.live
+            ? "Còn trên cloud — link vẫn dùng được"
+            : "Đã xoá khỏi cloud — link cũ đang chết"}
+        </b>
+        <code>{found.id}</code>
+      </div>
+
+      {found.live && (
+        <div className="data-found-row">
+          <span className={`data-badge data-badge--${found.live.type}`} style={{ cursor: "default" }}>
+            {found.live.type === "image" ? "Ảnh" : "Video"}
+          </span>
+          <span className="data-item-title">
+            {found.live.title || <i>(không tiêu đề)</i>}
+          </span>
+          <span className="data-item-time">{fmtDateTime(found.live.createdAt)}</span>
+          <button
+            className="data-btn"
+            title={found.live.url}
+            onClick={() => openUrl(found.live!.url).catch(() => {})}
+          >
+            Mở link
+          </button>
+        </div>
+      )}
+
+      {/* Mục đã xoá thì không còn tiêu đề ở đâu ngoài sổ kho — lấy tạm từ bản sao đầu tiên
+          để người tìm theo tiêu đề vẫn thấy đúng thứ mình vừa gõ. */}
+      {!found.live && found.copies.length > 0 && (
+        <div className="data-found-row">
+          <span className={`data-badge data-badge--${found.copies[0].type}`} style={{ cursor: "default" }}>
+            {found.copies[0].type === "image" ? "Ảnh" : "Video"}
+          </span>
+          <span className="data-item-title">
+            {found.copies[0].title || <i>(không tiêu đề)</i>}
+          </span>
+          {found.copies[0].createdAt != null && (
+            <span className="data-item-time">{fmtDateTime(found.copies[0].createdAt!)}</span>
+          )}
+        </div>
+      )}
+
+      {/* Bản sao dưới máy: với mục đã xoá thì đây là đường cứu duy nhất, nên
+          phải chỉ rõ máy nào + thư mục nào + tên file nào. */}
+      {found.copies.length > 0 ? (
+        <div className="data-found-copies">
+          <div className="data-found-sub">
+            Có bản sao ở {found.copies.length} kho dưới máy:
+          </div>
+          {found.copies.map((c) => (
+            <div className="data-found-copy" key={c.storeId}>
+              <span className={`data-chip${c.device === device ? " data-chip--here" : ""}`}>
+                {c.device === device ? "máy này" : c.device}
+              </span>
+              <span className="data-found-path" title={c.dir}>{c.dir}</span>
+              <span className="data-found-file" title={c.file ?? ""}>{c.file}</span>
+              {c.device === device && (
+                <button
+                  className="data-ico"
+                  title="Mở thư mục trong File Explorer"
+                  onClick={() => onOpenArchiveDir(c.dir)}
+                >
+                  <IcoFolder />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        !found.live && (
+          <p className="data-note">
+            Không có bản sao nào trong sổ kho — mục này đã mất hẳn, không khôi phục được.
+          </p>
+        )
+      )}
+    </div>
+  );
+}
+
 export function DataScreen(props: Props) {
   const { overview, loading, error, orphan, syncing, onRefresh, onPurgeOrphans, onPurgeRange, onPurgeIds, onArchiveItems, onRestore, progress, archiveStores, device, dirStates, onOpenArchiveDir, onForgetArchiveStore, onRefreshArchives } = props;
 
@@ -273,23 +370,48 @@ export function DataScreen(props: Props) {
   const [bulkNote, setBulkNote] = useState<string | null>(null);
   // Kho đang mở xem chi tiết + danh sách mục của nó (lấy từ sổ trên cloud, không đọc đĩa
   // — nhờ vậy xem được cả kho nằm ở máy khác).
-  // Tra cứu theo id / link dán vào
+  // Tra cứu: id / link dán vào, hoặc một mẩu tiêu đề
   const [query, setQuery] = useState("");
   const [lookup, setLookup] = useState<IdLookup | null>(null);
+  const [hits, setHits] = useState<FoundItem[] | null>(null);
+  const [hitsCut, setHitsCut] = useState(false);
   const [lookupErr, setLookupErr] = useState<string | null>(null);
   const [looking, setLooking] = useState(false);
 
-  async function runLookup() {
-    const id = parseItemId(query);
+  function clearFind() {
+    setQuery("");
     setLookup(null);
-    if (!id) {
-      setLookupErr("Id phải đúng 10 ký tự chữ/số. Dán cả link chia sẻ cũng được.");
+    setHits(null);
+    setHitsCut(false);
+    setLookupErr(null);
+  }
+
+  /** Gõ gì tra nấy: đúng khuôn id (hoặc link chia sẻ) thì tra thẳng mục đó, còn lại tìm
+   *  theo tiêu đề. Không bắt người dùng chọn kiểu tra trước. */
+  async function runFind() {
+    const raw = query.trim();
+    if (!raw) return;
+    setLookup(null);
+    setHits(null);
+    setHitsCut(false);
+    setLookupErr(null);
+    const id = parseItemId(raw);
+    if (!id && raw.length < 2) {
+      setLookupErr("Gõ ít nhất 2 ký tự của tiêu đề, hoặc dán id 10 ký tự / link chia sẻ.");
       return;
     }
-    setLookupErr(null);
     setLooking(true);
     try {
-      setLookup(await lookupId(id));
+      if (id) {
+        setLookup(await lookupId(id));
+      } else {
+        const res = await searchTitle(raw);
+        setHits(res.results);
+        setHitsCut(res.truncated);
+        if (res.results.length === 0) {
+          setLookupErr("Không có mục nào có tiêu đề chứa “" + raw + "”.");
+        }
+      }
     } catch (err) {
       setLookupErr(String(err));
     } finally {
@@ -411,7 +533,7 @@ export function DataScreen(props: Props) {
             `Xong rồi bấm lại nút này để làm tiếp phần còn lại.`
         );
       }
-      return onArchiveItems(page.items);
+      return onArchiveItems(page.items, p.label);
     }, openKey === p.key ? p : undefined);
   }
 
@@ -426,7 +548,7 @@ export function DataScreen(props: Props) {
   async function archiveSelected(p: Period) {
     const chosen = items.filter((it) => selected.has(it.id));
     if (chosen.length === 0) return;
-    const ok = await run(() => onArchiveItems(chosen), p);
+    const ok = await run(() => onArchiveItems(chosen, p.label), p);
     if (ok) setSelected(new Set());
   }
 
@@ -456,7 +578,7 @@ export function DataScreen(props: Props) {
           </p>
         </div>
         <div className="data-header-actions">
-          <button onClick={() => onRestore()} disabled={loading || busy || !!progress} title="Chọn thư mục kho đã lưu dưới máy và tải các mục trong đó lên lại">
+          <button onClick={() => onRestore()} disabled={loading || busy || !!progress} title="Chọn một hay nhiều thư mục (giữ Ctrl để chọn thêm) — cả thư mục kho lẫn thư mục theo mốc bên trong đều được — rồi tải các mục trong đó lên lại">
             <IcoRestore />Khôi phục từ máy
           </button>
           <button
@@ -558,28 +680,24 @@ export function DataScreen(props: Props) {
 
             <section className="data-card">
               <div className="data-card-head">
-                <h2>Tra theo ID</h2>
+                <h2>Tra theo ID hoặc tiêu đề</h2>
                 <span className="data-hint">Còn sống thì hiện link, đã xoá thì chỉ ra máy và thư mục đang giữ</span>
               </div>
 
               <div className="data-find">
                 <input
                   className="data-find-input"
-                  placeholder="Dán id (vd Br5EIm7oVW) hoặc cả link chia sẻ…"
+                  placeholder="Dán id (vd Br5EIm7oVW) / link chia sẻ, hoặc gõ tiêu đề…"
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") runLookup(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") runFind(); }}
                   spellCheck={false}
                 />
-                <button className="data-btn data-btn--save" onClick={runLookup} disabled={looking || !query.trim()}>
+                <button className="data-btn data-btn--save" onClick={runFind} disabled={looking || !query.trim()}>
                   <IcoSearch />{looking ? "Đang tra…" : "Tra"}
                 </button>
-                {(lookup || lookupErr) && (
-                  <button
-                    className="data-ico"
-                    title="Xoá kết quả"
-                    onClick={() => { setQuery(""); setLookup(null); setLookupErr(null); }}
-                  >
+                {(lookup || hits || lookupErr) && (
+                  <button className="data-ico" title="Xoá kết quả" onClick={clearFind}>
                     <IcoClose />
                   </button>
                 )}
@@ -588,70 +706,19 @@ export function DataScreen(props: Props) {
               {lookupErr && <p className="data-error">{lookupErr}</p>}
 
               {lookup && (
-                <div className="data-found">
-                  <div className={`data-found-head data-found-head--${lookup.live ? "live" : "gone"}`}>
-                    <span className="data-found-dot" />
-                    <b>
-                      {lookup.live
-                        ? "Còn trên cloud — link vẫn dùng được"
-                        : "Đã xoá khỏi cloud — link cũ đang chết"}
-                    </b>
-                    <code>{lookup.id}</code>
-                  </div>
+                <FoundCard found={lookup} device={device} onOpenArchiveDir={onOpenArchiveDir} />
+              )}
 
-                  {lookup.live && (
-                    <div className="data-found-row">
-                      <span className={`data-badge data-badge--${lookup.live.type}`} style={{ cursor: "default" }}>
-                        {lookup.live.type === "image" ? "Ảnh" : "Video"}
-                      </span>
-                      <span className="data-item-title">
-                        {lookup.live.title || <i>(không tiêu đề)</i>}
-                      </span>
-                      <span className="data-item-time">{fmtDateTime(lookup.live.createdAt)}</span>
-                      <button
-                        className="data-btn"
-                        title={lookup.live.url}
-                        onClick={() => openUrl(lookup.live!.url).catch(() => {})}
-                      >
-                        Mở link
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Bản sao dưới máy: với mục đã xoá thì đây là đường cứu duy nhất, nên
-                      phải chỉ rõ máy nào + thư mục nào + tên file nào. */}
-                  {lookup.copies.length > 0 ? (
-                    <div className="data-found-copies">
-                      <div className="data-found-sub">
-                        Có bản sao ở {lookup.copies.length} kho dưới máy:
-                      </div>
-                      {lookup.copies.map((c) => (
-                        <div className="data-found-copy" key={c.storeId}>
-                          <span className={`data-chip${c.device === device ? " data-chip--here" : ""}`}>
-                            {c.device === device ? "máy này" : c.device}
-                          </span>
-                          <span className="data-found-path" title={c.dir}>{c.dir}</span>
-                          <span className="data-found-file" title={c.file ?? ""}>{c.file}</span>
-                          {c.device === device && (
-                            <button
-                              className="data-ico"
-                              title="Mở thư mục trong File Explorer"
-                              onClick={() => onOpenArchiveDir(c.dir)}
-                            >
-                              <IcoFolder />
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    !lookup.live && (
-                      <p className="data-note">
-                        Không có bản sao nào trong sổ kho — mục này đã mất hẳn, không khôi phục được.
-                      </p>
-                    )
-                  )}
-                </div>
+              {hits && hits.length > 0 && (
+                <>
+                  <p className="data-hits">
+                    Tìm thấy <b>{hits.length} mục</b> có tiêu đề khớp
+                    {hitsCut && " (chỉ hiện những mục mới nhất — gõ rõ hơn để thu hẹp)"}
+                  </p>
+                  {hits.map((h) => (
+                    <FoundCard key={h.id} found={h} device={device} onOpenArchiveDir={onOpenArchiveDir} />
+                  ))}
+                </>
               )}
             </section>
 
@@ -670,7 +737,8 @@ export function DataScreen(props: Props) {
                 <div className="data-empty">
                   Sổ kho chưa có gì. Lưu bằng nút <b>⬇</b> ở mỗi mốc thời gian bên dưới, hoặc bấm
                   <b>“Khôi phục từ máy”</b> chọn thư mục kho cũ một lần — kho sẽ được ghi vào sổ
-                  và hiện ở đây trên <b>mọi máy</b> dùng chung tài khoản.
+                  và hiện ở đây trên <b>mọi máy</b> dùng chung tài khoản. Chọn được nhiều thư mục
+                  cùng lúc (giữ Ctrl), và chỉ thẳng vào thư mục theo mốc bên trong kho cũng nhận.
                 </div>
               ) : (
                 <div className="data-dirs">
@@ -759,6 +827,18 @@ export function DataScreen(props: Props) {
                                 <span className="data-item-size">
                                   {it.bytes == null ? "—" : formatBytes(it.bytes)}
                                 </span>
+                                <button
+                                  className="data-ico data-ico--restore"
+                                  disabled={locked || !here || gone}
+                                  title={
+                                    here
+                                      ? "Khôi phục riêng mục này lên cloud"
+                                      : `Kho này nằm ở máy “${s.device}” — mở app trên máy đó để khôi phục`
+                                  }
+                                  onClick={() => onRestore(s.dir, [it.itemId])}
+                                >
+                                  <IcoRestore />
+                                </button>
                               </div>
                             ))}
                           </div>
@@ -917,7 +997,7 @@ export function DataScreen(props: Props) {
               Dung lượng tính theo số byte thật trên Cloudflare R2 (ảnh đã gộp + ảnh gốc dùng để sửa lại annotate).
               “Xoá hẳn” là xoá vĩnh viễn cả file lẫn link chia sẻ, không thể hoàn tác.
               “Lưu về máy &amp; xoá” tải nội dung xuống thư mục bạn chọn trước, chỉ xoá trên cloud những mục đã lưu xong,
-              và khôi phục lại được bằng nút “Khôi phục từ máy” — mục khôi phục xin lại đúng link chia sẻ cũ, trừ khi id đó đã bị nội dung khác dùng mất.
+              và khôi phục lại được bằng nút “Khôi phục từ máy” (chọn được nhiều thư mục một lượt, chỉ thẳng vào thư mục theo mốc bên trong kho cũng nhận) — mục khôi phục xin lại đúng link chia sẻ cũ, trừ khi id đó đã bị nội dung khác dùng mất.
             </p>
           </>
         )}
@@ -989,6 +1069,7 @@ function DataStyles() {
     .data-find{display:flex;align-items:center;gap:8px;margin-top:12px}
     .data-find-input{flex:1;min-width:0;border:1px solid #dfe2e7;border-radius:9px;padding:9px 12px;font-size:12.5px;font-family:inherit;color:#1f2937}
     .data-find-input:focus{outline:none;border-color:#a5b4fc;box-shadow:0 0 0 3px rgba(99,102,241,.14)}
+    .data-hits{margin:12px 0 0;font-size:11.5px;color:#6b7280}
     .data-found{margin-top:12px;border:1px solid #eef0f3;border-radius:10px;overflow:hidden}
     .data-found-head{display:flex;align-items:center;gap:9px;padding:10px 12px;font-size:12.5px}
     .data-found-head code{margin-left:auto;font-size:11.5px;color:#6b7280;background:#fff;border:1px solid #e5e7eb;border-radius:6px;padding:2px 7px}
@@ -1009,7 +1090,7 @@ function DataStyles() {
     .data-dir-row{display:grid;grid-template-columns:minmax(0,1fr) 175px auto auto 28px 28px;align-items:center;gap:10px;padding:10px 12px}
     .data-dir--gone{background:#fff7ed;border-color:#fed7aa}
     .data-dir-body{border-top:1px solid #eef0f3;background:#fff;padding:4px 12px 8px}
-    .data-store-item{display:grid;grid-template-columns:48px 1fr 140px 76px;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:11.5px}
+    .data-store-item{display:grid;grid-template-columns:48px 1fr 140px 76px 30px;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:11.5px}
     .data-store-item:last-child{border-bottom:none}
     .data-chip{margin-left:7px;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:99px;background:#eef0f3;color:#6b7280;vertical-align:middle}
     .data-chip--here{background:#dcfce7;color:#15803d}
@@ -1042,6 +1123,7 @@ function DataStyles() {
     .data-ico:hover:not(:disabled){background:#f1f3f6;color:#4b5563;border-color:transparent}
     .data-ico--save:hover:not(:disabled){background:#eef2ff;color:#4f46e5;border-color:#c7d2fe}
     .data-ico--danger:hover:not(:disabled){background:#fef2f2;color:#dc2626;border-color:#fecaca}
+    .data-ico--restore:hover:not(:disabled){background:#ecfdf5;color:#059669;border-color:#a7f3d0}
     .data-ico:disabled{opacity:.4;cursor:default}
     .data-note{margin:10px 0 0;padding:9px 12px;border-radius:9px;background:#fffbeb;border:1px solid #fde68a;color:#92400e;font-size:11.5px;line-height:1.5}
 

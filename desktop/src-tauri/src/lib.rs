@@ -3,6 +3,7 @@ mod capture;
 mod ffmpeg;
 mod record;
 
+use base64::{engine::general_purpose, Engine as _};
 use std::str::FromStr;
 use std::sync::Mutex;
 use tauri::{
@@ -234,6 +235,27 @@ fn save_video_to_path(src: String, dst: String) -> Result<(), String> {
     std::fs::copy(&src, &dst).map(|_| ()).map_err(|e| e.to_string())
 }
 
+// Lưu ảnh đang chú thích ra file người dùng tự chọn. Ảnh đi từ webview sang dưới dạng
+// data URL vì plugin fs chỉ được cấp quyền ĐỌC trong $TEMP — ghi ra chỗ khác phải qua đây.
+#[tauri::command]
+fn save_image_to_path(data_url: String, dst: String) -> Result<(), String> {
+    let b64 = data_url
+        .split_once("base64,")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&data_url);
+    let bytes = general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("Ảnh hỏng: {e}"))?;
+    // Ghi ra .part rồi đổi tên: hết đĩa hay mất điện giữa chừng thì không để lại một file
+    // .png dở dang trông y như đã lưu xong.
+    let part = format!("{dst}.part");
+    std::fs::write(&part, bytes).map_err(|e| format!("Không lưu được file: {e}"))?;
+    std::fs::rename(&part, &dst).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        format!("Không lưu được file: {e}")
+    })
+}
+
 // Cắt video (async + spawn_blocking để không treo UI khi ffmpeg chạy).
 #[tauri::command]
 async fn trim_video(app: AppHandle, src: String, start: f64, end: f64) -> Result<String, String> {
@@ -382,6 +404,7 @@ pub fn run() {
             capture::capture_sizes,
             remove_temp,
             save_video_to_path,
+            save_image_to_path,
             trim_video,
             toggle_recording_cmd,
             archive::archive_save,
