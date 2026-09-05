@@ -31,21 +31,26 @@ struct QualityCfg {
     video: Mutex<u32>,
 }
 
-// Mặc định 2K: máy phổ thông (1080p/1440p) giữ nguyên chất lượng như trước khi có setting
-// này, chỉ màn 4K mới bị thu xuống — không ai bỗng dưng thấy ảnh xấu đi sau khi cập nhật.
-pub const DEFAULT_QUALITY: u32 = 1440;
-const QUALITY_CHOICES: [u32; 3] = [720, 1080, 1440];
+// ẢNH mặc định 4K: vì không bao giờ phóng to, mức này có nghĩa là "không thu nhỏ gì cả" —
+// ảnh chụp giữ đúng từng pixel của màn hình dù màn to tới đâu. Máy 1080p/1440p không đổi gì
+// so với mức 2K cũ (đằng nào cũng chẳng có gì để thu), chỉ màn 4K là hết bị cắt mất chi tiết.
+pub const DEFAULT_IMAGE_QUALITY: u32 = 2160;
+// VIDEO vẫn mặc định 2K: quay 4K nặng gấp bội cả lúc mã hoá lẫn lúc gửi đi, nên để người
+// dùng tự chọn chứ không bật sẵn.
+pub const DEFAULT_VIDEO_QUALITY: u32 = 1440;
+const QUALITY_CHOICES: [u32; 4] = [720, 1080, 1440, 2160];
 
 fn quality_file(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("quality.cfg"))
 }
 
-// Chỉ nhận đúng ba mức có trong Cài đặt; số lạ (file hỏng, bản cũ) → mặc định, tránh để
-// lọt số 0 xuống ffmpeg làm chết cả phiên quay.
-fn parse_quality(s: Option<&str>) -> u32 {
+// Chỉ nhận đúng các mức có trong Cài đặt; số lạ (file hỏng, bản cũ) → mặc định, tránh để
+// lọt số 0 xuống ffmpeg làm chết cả phiên quay. Ảnh và video có mặc định khác nhau nên
+// phải truyền vào — dùng chung một hằng thì bản cũ hỏng file sẽ kéo video lên 4K.
+fn parse_quality(s: Option<&str>, default: u32) -> u32 {
     s.and_then(|l| l.trim().parse::<u32>().ok())
         .filter(|v| QUALITY_CHOICES.contains(v))
-        .unwrap_or(DEFAULT_QUALITY)
+        .unwrap_or(default)
 }
 
 fn load_saved_quality(app: &AppHandle) -> (u32, u32) {
@@ -54,7 +59,10 @@ fn load_saved_quality(app: &AppHandle) -> (u32, u32) {
         None => String::new(),
     };
     let lines: Vec<&str> = content.lines().collect();
-    (parse_quality(lines.first().copied()), parse_quality(lines.get(1).copied()))
+    (
+        parse_quality(lines.first().copied(), DEFAULT_IMAGE_QUALITY),
+        parse_quality(lines.get(1).copied(), DEFAULT_VIDEO_QUALITY),
+    )
 }
 
 fn save_quality_file(app: &AppHandle, image: u32, video: u32) {
@@ -217,8 +225,8 @@ fn get_quality(app: AppHandle) -> (u32, u32) {
 
 #[tauri::command]
 fn set_quality(app: AppHandle, image: u32, video: u32) {
-    let image = parse_quality(Some(&image.to_string()));
-    let video = parse_quality(Some(&video.to_string()));
+    let image = parse_quality(Some(&image.to_string()), DEFAULT_IMAGE_QUALITY);
+    let video = parse_quality(Some(&video.to_string()), DEFAULT_VIDEO_QUALITY);
     let st = app.state::<QualityCfg>();
     *st.image.lock().unwrap() = image;
     *st.video.lock().unwrap() = video;

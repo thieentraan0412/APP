@@ -364,6 +364,10 @@ export function DataScreen(props: Props) {
   const [itemsTruncated, setItemsTruncated] = useState(false);
   const [itemsLoading, setItemsLoading] = useState(false);
   const [itemsError, setItemsError] = useState<string | null>(null);
+  // Lọc tại chỗ trong mốc đang mở: gõ id hoặc tiêu đề. Một tháng có thể vài trăm mục, cuộn
+  // tay tìm một cái là mỏi. Danh sách đã nằm sẵn trong RAM nên lọc ngay, không gọi server —
+  // khác với ô "Tra theo ID hoặc tiêu đề" ở trên (ô đó tra toàn bộ kho qua server).
+  const [periodQuery, setPeriodQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   // Thông báo cho thao tác chạy trên cả mốc thời gian (không mở danh sách ra) — chỗ này
@@ -443,6 +447,17 @@ export function DataScreen(props: Props) {
     });
   }, [storeItems, storeQuery]);
 
+  // Cùng luật lọc với kho: bỏ dấu, mọi từ đều phải khớp. Chỉ soi id + tiêu đề vì mục trên
+  // cloud chưa có tên file như bản đã lưu về máy.
+  const itemsShown = useMemo(() => {
+    const terms = fold(periodQuery).split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return items;
+    return items.filter((it) => {
+      const hay = fold(`${it.id} ${it.title ?? ""}`);
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [items, periodQuery]);
+
   async function copyId(id: string) {
     try {
       await writeText(id); // plugin clipboard của Tauri, cùng đường với copy link bên App
@@ -509,6 +524,7 @@ export function DataScreen(props: Props) {
   }
 
   function toggleOpen(p: Period) {
+    setPeriodQuery(""); // bộ lọc là của mốc đang mở, sang mốc khác thì bắt đầu sạch
     if (openKey === p.key) {
       setOpenKey(null);
       setItems([]);
@@ -591,8 +607,25 @@ export function DataScreen(props: Props) {
     if (ok) setSelected(new Set());
   }
 
+  // Dung lượng tính trên TẤT CẢ mục đã chọn, kể cả mục đang bị bộ lọc giấu đi — nút xoá
+  // hành động theo `selected` chứ không theo danh sách đang hiện, nên con số phải khớp nút.
   const selectedBytes = items.filter((it) => selected.has(it.id)).reduce((s, it) => s + (it.bytes ?? 0), 0);
-  const allSelected = items.length > 0 && items.every((it) => selected.has(it.id));
+  // Ngược lại, "Chọn tất cả" chỉ nói về những mục ĐANG HIỆN: lọc còn 3 mục mà bấm lại quét
+  // trúng cả 400 mục của tháng thì quá nguy hiểm cho một nút nằm cạnh nút xoá hẳn.
+  const allSelected = itemsShown.length > 0 && itemsShown.every((it) => selected.has(it.id));
+
+  // Bật/tắt cả nhóm đang hiện mà KHÔNG đụng tới lựa chọn đang bị lọc giấu: người dùng lọc
+  // "hoá đơn" chọn vài mục, gõ tiếp "báo giá" chọn thêm — cả hai lượt đều còn.
+  function toggleAllShown() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const it of itemsShown) {
+        if (allSelected) next.delete(it.id);
+        else next.add(it.id);
+      }
+      return next;
+    });
+  }
   // Khôi phục chạy từ header nên không đi qua run() → busy vẫn false. Chốt riêng để trong
   // lúc tải về / khôi phục không ai bấm được nút xoá.
   const locked = busy || progress !== null;
@@ -978,17 +1011,32 @@ export function DataScreen(props: Props) {
                           {itemsError && <p className="data-error">Lỗi: {itemsError}</p>}
                           {!itemsLoading && !itemsError && (
                             <>
+                              {items.length > 0 && (
+                                <div className="data-store-filter">
+                                  <IcoSearch />
+                                  <input
+                                    className="data-find-input"
+                                    placeholder="Lọc trong mốc này theo id hoặc tiêu đề…"
+                                    value={periodQuery}
+                                    onChange={(e) => setPeriodQuery(e.target.value)}
+                                    spellCheck={false}
+                                  />
+                                  <span className="data-hint">{itemsShown.length}/{items.length} mục</span>
+                                  {periodQuery && (
+                                    <button className="data-ico" title="Xoá bộ lọc" onClick={() => setPeriodQuery("")}>
+                                      <IcoClose />
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+
                               <div className="data-itembar">
                                 <label className="data-check-label">
-                                  <input
-                                    type="checkbox"
-                                    checked={allSelected}
-                                    onChange={() => setSelected(allSelected ? new Set() : new Set(items.map((it) => it.id)))}
-                                  />
-                                  Chọn tất cả ({items.length})
+                                  <input type="checkbox" checked={allSelected} onChange={toggleAllShown} />
+                                  Chọn tất cả ({itemsShown.length})
                                 </label>
                                 <span className="data-hint">
-                                  Nặng nhất xếp trước · bấm nhãn Ảnh/Video để mở link
+                                  Nặng nhất xếp trước · bấm nhãn Ảnh/Video để mở link · bấm id để copy
                                   {itemsTruncated && ` · hiển thị ${items.length}/${formatNumber(itemsTotal)} mục`}
                                 </span>
                                 <div className="data-spacer" />
@@ -1010,9 +1058,12 @@ export function DataScreen(props: Props) {
                               </div>
 
                               {items.length === 0 && <div className="data-empty">Không còn nội dung nào trong mốc này.</div>}
+                              {items.length > 0 && itemsShown.length === 0 && (
+                                <div className="data-empty">Không có mục nào khớp “{periodQuery.trim()}”.</div>
+                              )}
 
                               <div className="data-items">
-                                {items.map((it) => (
+                                {itemsShown.map((it) => (
                                   <label className={`data-item${selected.has(it.id) ? " data-item--on" : ""}`} key={it.id}>
                                     <input
                                       type="checkbox"
@@ -1038,6 +1089,20 @@ export function DataScreen(props: Props) {
                                       {it.type === "image" ? "Ảnh" : "Video"}
                                     </button>
                                     <span className="data-item-title">{it.title || <i>(không tiêu đề)</i>}</span>
+                                    <button
+                                      type="button"
+                                      className="data-item-id"
+                                      title="Bấm để copy id"
+                                      onClick={(e) => {
+                                        // Cùng lý do với nhãn Ảnh/Video: nút này nằm trong <label>
+                                        // bọc ô tick, không chặn thì copy id hoá ra chọn/bỏ chọn mục.
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        copyId(it.id);
+                                      }}
+                                    >
+                                      {copiedId === it.id ? "đã copy" : it.id}
+                                    </button>
                                     <span className="data-item-time">{fmtDateTime(it.createdAt)}</span>
                                     <span className="data-item-size">{it.bytes == null ? "—" : formatBytes(it.bytes)}</span>
                                   </label>
@@ -1192,7 +1257,7 @@ function DataStyles() {
     .data-check-label{display:flex;align-items:center;gap:7px;font-size:11.5px;color:#4b5563;font-weight:600;cursor:pointer}
     .data-spacer{flex:1}
     .data-items{display:flex;flex-direction:column}
-    .data-item{display:grid;grid-template-columns:16px 48px 1fr 140px 76px;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid #f0f1f3;font-size:11.5px;cursor:pointer}
+    .data-item{display:grid;grid-template-columns:16px 48px 1fr 96px 140px 76px;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid #f0f1f3;font-size:11.5px;cursor:pointer}
     .data-item:last-child{border-bottom:none}
     .data-item:hover{background:#f4f6f8}
     .data-item--on{background:#eef2ff}
@@ -1218,7 +1283,8 @@ function DataStyles() {
       .data-summary{grid-template-columns:repeat(2,minmax(0,1fr))}
       .data-period-row{grid-template-columns:18px 1fr 100px 62px}
       .data-period-bar,.data-period-count{display:none}
-      .data-item{grid-template-columns:16px 48px 1fr 76px}
+      /* Hẹp thì bỏ giờ, GIỮ id: id mới là thứ dùng để tra cứu / đối chiếu link. */
+      .data-item{grid-template-columns:16px 48px 1fr 96px 76px}
       .data-item-time{display:none}
     }
   `}</style>;

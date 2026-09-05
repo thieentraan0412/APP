@@ -1,6 +1,6 @@
 [package]
 name = "desktop"
-version = "0.5.1"
+version = "0.6.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -23,7 +23,13 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-global-shortcut = "2.3.2"
-xcap = "0.9.6"
+# feature "wgc" = chụp qua Windows Graphics Capture thay cho GDI BitBlt (mặc định của xcap).
+# BẮT BUỘC phải bật: BitBlt chép lại framebuffer ĐÃ bị driver màn hình làm tối. Đo trên máy
+# thật, cùng một cửa sổ chụp liên tiếp bằng hai đường: BitBlt cho kênh cao nhất 222/255 và
+# KHÔNG có nổi một pixel trắng nào, PrintWindow cho 255 với 297k pixel trắng. Tức mọi ảnh
+# chụp bị nhân ~0.871 — vừa xám vừa mất 13% tương phản chữ/nền nên nhìn như bị mờ.
+# WGC đọc thẳng surface DWM nên ra đúng 255. Cần Windows 10 1903 trở lên.
+xcap = { version = "0.9.6", features = ["wgc"] }
 image = "0.25.10"
 base64 = "0.22.1"
 tauri-plugin-clipboard-manager = "2.3.2"
