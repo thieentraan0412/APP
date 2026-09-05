@@ -275,6 +275,10 @@ function App() {
   // Màn hình kết quả
   const [preview, setPreview] = useState<string | null>(null);
   const [previewType, setPreviewType] = useState<"image" | "video">("image");
+  // Xem ảnh kết quả ở kích thước thật (1:1). Mặc định thu vừa khung nên ảnh 1080p bị
+  // trình duyệt co lại ~0,65× → chữ nhỏ bết; bấm vào ảnh để xem đúng từng pixel.
+  const [previewFull, setPreviewFull] = useState(false);
+  useEffect(() => setPreviewFull(false), [preview]);
   const [uploading, setUploading] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -1773,7 +1777,7 @@ function App() {
         {uploadError && <p className="error">Lỗi: {uploadError}</p>}
 
         {preview && (
-          <div className="preview">
+          <div className={previewFull ? "preview preview--full" : "preview"}>
             {previewType === "video" ? (
               <video
                 ref={videoElRef}
@@ -1787,7 +1791,12 @@ function App() {
                 }}
               />
             ) : (
-              <img src={preview} alt="Ảnh đã gộp khung + note" />
+              <img
+                src={preview}
+                alt="Ảnh đã gộp khung + note"
+                title={previewFull ? "Bấm để thu vừa khung" : "Bấm để xem kích thước thật"}
+                onClick={() => setPreviewFull((v) => !v)}
+              />
             )}
           </div>
         )}

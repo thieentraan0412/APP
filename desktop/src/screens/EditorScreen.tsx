@@ -635,11 +635,10 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       ),
     };
 
-    // Ảnh gốc (để sau này sửa lại annotate) — nén WebP cho nhẹ.
+    // Ảnh gốc (để sau này sửa lại annotate) — WebP lossless, không phụ thuộc mức chất lượng:
+    // đây là bản master, mỗi lần sửa lại đều dựng từ nó nên không được mất nét.
     // Trước đây giữ nguyên PNG full màn hình (vài MB) nên upload lên R2 rất lâu.
-    const original =
-      (await imageToWebpBlob(img, Math.max(0.92, webpQuality(imageQuality)))) ??
-      dataUrlToBlob(imageDataUrl);
+    const original = (await imageToWebpBlob(img)) ?? dataUrlToBlob(imageDataUrl);
 
     setSaving(false);
     onSaved(blob, original, annotations, title.trim());

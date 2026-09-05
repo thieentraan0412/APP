@@ -167,6 +167,13 @@ kbd {
   max-height: 70vh;
 }
 
+.preview img { cursor: zoom-in; }
+
+/* Xem 1:1: bỏ giới hạn cỡ và chuyển sang block — giữ flex center thì phần tràn bên trái
+   không cuộn tới được (flex canh giữa phần tử to hơn khung sẽ cắt cả hai mép). */
+.preview--full { display: block; }
+.preview--full img { max-width: none; max-height: none; cursor: zoom-out; }
+
 .linkbar {
   display: flex;
   gap: 0.5rem;

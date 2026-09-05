@@ -16,6 +16,8 @@ tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại:
 - Cắt video (chọn đoạn cần giữ) trước khi lưu
 - Dán ảnh từ clipboard (Ctrl + V) vào thẳng trình chỉnh sửa
 - Đổi được mọi phím tắt trong phần Cài đặt
+- Chọn mức chất lượng ảnh / video trong Cài đặt (720p · Full HD · 2K) — mức 2K lưu ảnh
+  WebP không nén mất dữ liệu, đúng từng pixel
 
 ## 2. Chú thích ảnh
 
@@ -37,7 +39,8 @@ tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại:
 
 - Lưu lên Cloudflare R2, trả link công khai dạng `/v/<id>`
 - Tự copy link vào clipboard sau khi lưu
-- Trang xem link có sẵn cho người nhận, không cần cài gì
+- Trang xem link có sẵn cho người nhận, không cần cài gì; bấm vào ảnh để xem đúng kích thước
+  thật 1:1 (màn kết quả trong app cũng vậy)
 - Lưu file về máy thay vì đăng lên (với video)
 
 ## 4. Thư viện

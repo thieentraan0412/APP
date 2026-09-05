@@ -116,13 +116,14 @@ function ShortcutCapture({
 const QUALITY_OPTIONS: { value: number; label: string; hint: string }[] = [
   { value: 720, label: "720p", hint: "Cao tối đa 720px — file nhẹ nhất, gửi đi nhanh" },
   { value: 1080, label: "Full HD", hint: "Cao tối đa 1080px — cân bằng giữa nét và nhẹ" },
-  { value: 1440, label: "2K", hint: "Cao tối đa 1440px — nét nhất, file nặng hơn" },
+  { value: 1440, label: "2K", hint: "Cao tối đa 1440px — không nén mất dữ liệu, nét tuyệt đối" },
 ];
 
 // Kết quả thật của một mức trên nguồn cụ thể. Đây là phần quan trọng nhất của cả thẻ này:
-// trên màn 1080p, "Full HD" và "2K" cho ra ảnh GIỐNG HỆT nhau (đều 1920×1080, vì không
-// phóng to) — thấy hai con số bằng nhau thì người dùng hiểu ngay, còn nếu chỉ có nhãn thì
-// họ tưởng cài đặt bị hỏng.
+// trên màn 1080p, "Full HD" và "2K" cho ra ảnh CÙNG CỠ (đều 1920×1080, vì không phóng to)
+// — thấy hai con số bằng nhau thì người dùng hiểu ngay, còn nếu chỉ có nhãn thì họ tưởng
+// cài đặt bị hỏng. Khác biệt còn lại giữa hai mức là cách nén: 2K không nén mất dữ liệu
+// (xem webpQuality trong lib/flatten.ts), nên cùng cỡ mà vẫn nét hơn.
 function outSize(src: [number, number] | null, maxH: number): string | null {
   if (!src) return null;
   const [w, h] = src;
@@ -352,7 +353,8 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
           <div className="settings-card-footer">
             <span className="settings-hint">
               Số dưới mỗi mức là kích thước thật sẽ nhận được. Hai mức ra cùng một số nghĩa là
-              màn hình của bạn thấp hơn cả hai — chọn mức nào cũng cho ra ảnh y hệt nhau.
+              màn hình của bạn thấp hơn cả hai — cùng cỡ pixel, chỉ khác cách nén: với ảnh chụp,
+              mức 2K không nén mất dữ liệu nên vẫn nét hơn dù cùng cỡ.
               Mức mới áp dụng cho lần chụp / quay tiếp theo; phiên quay đang chạy vẫn giữ mức cũ.
             </span>
           </div>

@@ -1388,7 +1388,11 @@ const routes = {
 function seek(d){var v=document.getElementById('vid');if(!v)return;var t=v.currentTime+d;v.currentTime=Math.max(0,Math.min(v.duration||1e9,t));}
 document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);else if(e.key==='ArrowRight')seek(5);else if(e.key==='j')seek(-10);else if(e.key==='l')seek(10);});
 </script>`
-          : `<img src="${fileSrc}" style="max-width:100%;max-height:90vh"/>`;
+          : `<img id="pic" src="${fileSrc}" title="Bấm để xem kích thước thật"/>
+<p class="hint">Bấm vào ảnh để xem đúng kích thước thật · bấm lần nữa để thu vừa màn hình</p>
+<script>
+document.getElementById('pic').addEventListener('click',function(){document.body.classList.toggle('full');});
+</script>`;
 
       const html = `<!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
@@ -1399,6 +1403,12 @@ document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);
   .skip{display:flex;gap:8px;margin-top:12px}
   .skip button{cursor:pointer;background:#1f2937;color:#fff;border:1px solid #374151;border-radius:8px;padding:8px 14px;font-size:14px}
   .skip button:hover{background:#374151}
+  #pic{max-width:100%;max-height:90vh;cursor:zoom-in}
+  .hint{color:#9ca3af;font-size:12px;margin:10px 0 0}
+  /* 1:1 — canh về góc trên-trái để cuộn tới được mọi mép; canh giữa thì phần tràn bên trái bị cắt */
+  body.full{justify-content:flex-start;align-items:flex-start}
+  body.full h1,body.full .hint{margin-left:16px}
+  body.full #pic{max-width:none;max-height:none;cursor:zoom-out}
 </style></head>
 <body>
 ${heading}${media}
