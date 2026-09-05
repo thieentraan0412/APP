@@ -92,6 +92,20 @@ fn seg_path(index: usize) -> PathBuf {
     std::env::temp_dir().join(format!("capture_rec_seg{index}.mp4"))
 }
 
+// Mức nén x264 đi theo mức chất lượng đã chọn. Trước đây cố định 28 cho MỌI mức, nên chọn
+// 2K chỉ được thêm pixel chứ chữ vẫn bết vì nén y như mức thấp. Mỗi -6 crf ≈ nặng gấp đôi:
+// 20 so với 28 nặng ~2,5 lần — clip 1–2 phút 1080p rơi vào vài MB tới ~10 MB. Người chọn
+// 720p đang ưu tiên nhẹ nên giữ 28. Dùng chung cho cả cắt video (ffmpeg.rs) để đoạn cắt
+// không bị nén lại thô hơn bản quay gốc. 0 = không giới hạn → coi như mức cao nhất.
+pub fn crf_for(max_h: u32) -> &'static str {
+    match max_h {
+        0 => "20",
+        h if h <= 720 => "28",
+        h if h <= 1080 => "24",
+        _ => "20",
+    }
+}
+
 // Spawn ffmpeg quay 1 đoạn ra file `out`. Thử lại nhiều lần vì ngay sau khi tải,
 // Windows Defender có thể đang quét & khóa ffmpeg.exe (os error 32).
 fn spawn_segment(
@@ -140,7 +154,7 @@ fn spawn_segment(
     args.extend([
         "-c:v".into(), "libx264".into(),
         "-preset".into(), "ultrafast".into(), // không delay khi record
-        "-crf".into(), "28".into(),           // cân bằng chất/nặng
+        "-crf".into(), crf_for(max_h).into(), // nén theo mức chất lượng đã chọn
         "-pix_fmt".into(), "yuv420p".into(),
         "-movflags".into(), "+faststart".into(),
         out_str,

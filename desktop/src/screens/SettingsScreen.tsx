@@ -111,12 +111,24 @@ function ShortcutCapture({
   );
 }
 
-// Ba mức chất lượng, tính theo CHIỀU CAO tối đa. Chỉ thu nhỏ khi màn hình / ảnh lớn hơn
-// mức chọn — màn 1080p chọn "2K" thì không có gì thay đổi.
-const QUALITY_OPTIONS: { value: number; label: string; hint: string }[] = [
-  { value: 720, label: "720p", hint: "Cao tối đa 720px — file nhẹ nhất, gửi đi nhanh" },
-  { value: 1080, label: "Full HD", hint: "Cao tối đa 1080px — cân bằng giữa nét và nhẹ" },
-  { value: 1440, label: "2K", hint: "Cao tối đa 1440px — không nén mất dữ liệu, nét tuyệt đối" },
+// Ba mức chất lượng, tính theo CHIỀU CAO tối đa. Chỉ thu nhỏ khi màn hình / ảnh lớn hơn mức
+// chọn, không bao giờ phóng to. Ngoài kích thước, mức còn quyết định CÁCH NÉN — và hai loại
+// nén khác hẳn nhau nên hint tách riêng: ảnh 2K là lossless (lib/flatten.ts), còn video
+// luôn nén mất dữ liệu, chỉ nén nhẹ dần theo mức (crf_for trong record.rs).
+type QualityKind = "image" | "video";
+const QUALITY_OPTIONS: { value: number; label: string; hint: Record<QualityKind, string> }[] = [
+  {
+    value: 720, label: "720p",
+    hint: { image: "Cao tối đa 720px — file nhẹ nhất, gửi đi nhanh", video: "Cao tối đa 720px, nén mạnh — file nhẹ nhất, gửi đi nhanh" },
+  },
+  {
+    value: 1080, label: "Full HD",
+    hint: { image: "Cao tối đa 1080px — cân bằng giữa nét và nhẹ", video: "Cao tối đa 1080px, nén vừa — cân bằng giữa nét và nhẹ" },
+  },
+  {
+    value: 1440, label: "2K",
+    hint: { image: "Cao tối đa 1440px — không nén mất dữ liệu, nét tuyệt đối", video: "Cao tối đa 1440px, nén nhẹ nhất — nét nhất, file nặng hơn ~2,5 lần mức 720p" },
+  },
 ];
 
 // Kết quả thật của một mức trên nguồn cụ thể. Đây là phần quan trọng nhất của cả thẻ này:
@@ -138,9 +150,12 @@ function QualityPicker({
   source,
   disabled,
   onChange,
+  kind = "image",
 }: {
   label: string;
   value: number;
+  /** Ảnh hay video — chọn bộ hint cho đúng cách nén của loại đó. */
+  kind?: QualityKind;
   /** Nguồn để tính ra kích thước thật hiện dưới mỗi nút; null thì chỉ hiện nhãn. */
   source: [number, number] | null;
   disabled: boolean;
@@ -158,7 +173,7 @@ function QualityPicker({
               type="button"
               className={"segmented-btn" + (value === o.value ? " active" : "")}
               disabled={disabled}
-              title={o.hint}
+              title={o.hint[kind]}
               aria-pressed={value === o.value}
               onClick={() => onChange(o.value)}
             >
@@ -336,6 +351,7 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
           </div>
           <div className="settings-card-body">
             <QualityPicker
+              kind="image"
               label="Chất lượng ảnh chụp"
               value={qual.image}
               source={captureSizes ? [captureSizes[0], captureSizes[1]] : null}
@@ -343,6 +359,7 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
               onChange={(v) => changeQuality("image", v)}
             />
             <QualityPicker
+              kind="video"
               label="Chất lượng video quay"
               value={qual.video}
               source={captureSizes ? [captureSizes[2], captureSizes[3]] : null}
@@ -353,8 +370,8 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
           <div className="settings-card-footer">
             <span className="settings-hint">
               Số dưới mỗi mức là kích thước thật sẽ nhận được. Hai mức ra cùng một số nghĩa là
-              màn hình của bạn thấp hơn cả hai — cùng cỡ pixel, chỉ khác cách nén: với ảnh chụp,
-              mức 2K không nén mất dữ liệu nên vẫn nét hơn dù cùng cỡ.
+              màn hình của bạn thấp hơn cả hai — cùng cỡ pixel, chỉ khác cách nén: ảnh chụp ở mức 2K
+              không nén mất dữ liệu, video ở mức cao hơn nén nhẹ hơn — nên vẫn nét hơn dù cùng cỡ.
               Mức mới áp dụng cho lần chụp / quay tiếp theo; phiên quay đang chạy vẫn giữ mức cũ.
             </span>
           </div>

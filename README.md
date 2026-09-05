@@ -17,7 +17,8 @@ tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại:
 - Dán ảnh từ clipboard (Ctrl + V) vào thẳng trình chỉnh sửa
 - Đổi được mọi phím tắt trong phần Cài đặt
 - Chọn mức chất lượng ảnh / video trong Cài đặt (720p · Full HD · 2K) — mức 2K lưu ảnh
-  WebP không nén mất dữ liệu, đúng từng pixel
+  WebP không nén mất dữ liệu, đúng từng pixel; video ở mức cao hơn nén nhẹ hơn (nét hơn,
+  file nặng hơn — mức 2K nặng ~2,5 lần mức 720p)
 
 ## 2. Chú thích ảnh
 

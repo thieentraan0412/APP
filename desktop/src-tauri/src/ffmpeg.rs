@@ -94,7 +94,8 @@ fn ffmpeg_runs(path: &PathBuf) -> bool {
 // Cắt video từ `start` đến `end` (giây) → xuất mp4 tạm mới, trả về đường dẫn.
 // Dùng input-seek (`-ss` trước `-i`) + `-t` (thời lượng) rồi re-encode khớp cấu hình quay
 // để cắt chính xác theo khung hình. Tên output kèm timestamp → không đè lên file nguồn
-// (cho phép cắt nhiều lần liên tiếp).
+// (cho phép cắt nhiều lần liên tiếp). Mức nén lấy đúng crf của mức chất lượng đang chọn:
+// cắt mà nén thô hơn bản quay thì đoạn cắt xấu hơn đoạn gốc — người dùng không thể hiểu nổi.
 pub fn trim(app: &AppHandle, src: &str, start: f64, end: f64) -> Result<String, String> {
     let dur = end - start;
     if dur < 0.1 {
@@ -121,7 +122,7 @@ pub fn trim(app: &AppHandle, src: &str, start: f64, end: f64) -> Result<String, 
             "-t", t.as_str(),
             "-c:v", "libx264",
             "-preset", "ultrafast",
-            "-crf", "28",
+            "-crf", crate::record::crf_for(crate::video_quality(app)),
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             "-an", // video quay không có tiếng

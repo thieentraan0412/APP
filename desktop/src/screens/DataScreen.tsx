@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getStorageItems,
@@ -422,8 +423,38 @@ export function DataScreen(props: Props) {
   const [openStore, setOpenStore] = useState<string | null>(null);
   const [storeItems, setStoreItems] = useState<ArchivedItem[]>([]);
   const [storeLoading, setStoreLoading] = useState(false);
+  // Lọc tại chỗ trong kho đang mở: gõ id / tiêu đề / tên file. Kho vài trăm mục mà không
+  // có ô lọc thì tìm một mục là cuộn mỏi tay; sổ đã nằm sẵn trong RAM nên lọc ngay, không
+  // gọi server.
+  const [storeQuery, setStoreQuery] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Bỏ dấu + thường hoá để gõ "khai thue" vẫn ra "Khai thuế". NFD tách dấu thanh / dấu mũ
+  // thành ký tự kết hợp riêng rồi xoá đi; riêng "đ" không tách được nên đổi tay — hạ chữ thường
+  // TRƯỚC để "Đ" hoa cũng thành d.
+  const fold = (v: string) => v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/đ/g, "d");
+  const storeShown = useMemo(() => {
+    const terms = fold(storeQuery).split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return storeItems;
+    // Mọi từ đều phải khớp (AND): "khai 2026" thu hẹp dần, đúng như người ta mong khi gõ thêm.
+    return storeItems.filter((it) => {
+      const hay = fold(`${it.itemId} ${it.title ?? ""} ${it.file ?? ""}`);
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [storeItems, storeQuery]);
+
+  async function copyId(id: string) {
+    try {
+      await writeText(id); // plugin clipboard của Tauri, cùng đường với copy link bên App
+    } catch {
+      // Không ghi được clipboard thì thôi — id vẫn bôi chọn được bằng tay (user-select: all).
+    }
+    setCopiedId(id);
+    window.setTimeout(() => setCopiedId((cur) => (cur === id ? null : cur)), 1200);
+  }
 
   async function toggleStore(s: ArchiveStore) {
+    setStoreQuery(""); // bộ lọc là của kho đang mở, sang kho khác thì bắt đầu sạch
     if (openStore === s.id) {
       setOpenStore(null);
       setStoreItems([]);
@@ -813,7 +844,28 @@ export function DataScreen(props: Props) {
                             {!storeLoading && storeItems.length === 0 && (
                               <div className="data-empty">Sổ chưa ghi mục nào cho kho này.</div>
                             )}
-                            {!storeLoading && storeItems.map((it) => (
+                            {!storeLoading && storeItems.length > 0 && (
+                              <div className="data-store-filter">
+                                <IcoSearch />
+                                <input
+                                  className="data-find-input"
+                                  placeholder="Lọc theo id, tiêu đề, tên file…"
+                                  value={storeQuery}
+                                  onChange={(e) => setStoreQuery(e.target.value)}
+                                  spellCheck={false}
+                                />
+                                <span className="data-hint">{storeShown.length}/{storeItems.length} mục</span>
+                                {storeQuery && (
+                                  <button className="data-ico" title="Xoá bộ lọc" onClick={() => setStoreQuery("")}>
+                                    <IcoClose />
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                            {!storeLoading && storeItems.length > 0 && storeShown.length === 0 && (
+                              <div className="data-empty">Không có mục nào khớp “{storeQuery.trim()}”.</div>
+                            )}
+                            {!storeLoading && storeShown.map((it) => (
                               <div className="data-store-item" key={it.itemId}>
                                 <span className={`data-badge data-badge--${it.type}`} style={{ cursor: "default" }}>
                                   {it.type === "image" ? "Ảnh" : "Video"}
@@ -821,6 +873,14 @@ export function DataScreen(props: Props) {
                                 <span className="data-item-title" title={it.file ?? ""}>
                                   {it.title || <i>(không tiêu đề)</i>}
                                 </span>
+                                <button
+                                  type="button"
+                                  className="data-item-id"
+                                  title="Bấm để copy id"
+                                  onClick={() => copyId(it.itemId)}
+                                >
+                                  {copiedId === it.itemId ? "đã copy" : it.itemId}
+                                </button>
                                 <span className="data-item-time">
                                   {it.createdAt ? fmtDateTime(it.createdAt) : ""}
                                 </span>
@@ -1090,7 +1150,7 @@ function DataStyles() {
     .data-dir-row{display:grid;grid-template-columns:minmax(0,1fr) 175px auto auto 28px 28px;align-items:center;gap:10px;padding:10px 12px}
     .data-dir--gone{background:#fff7ed;border-color:#fed7aa}
     .data-dir-body{border-top:1px solid #eef0f3;background:#fff;padding:4px 12px 8px}
-    .data-store-item{display:grid;grid-template-columns:48px 1fr 140px 76px 30px;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:11.5px}
+    .data-store-item{display:grid;grid-template-columns:48px 1fr 96px 140px 76px 30px;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:11.5px}
     .data-store-item:last-child{border-bottom:none}
     .data-chip{margin-left:7px;font-size:9.5px;font-weight:700;padding:2px 7px;border-radius:99px;background:#eef0f3;color:#6b7280;vertical-align:middle}
     .data-chip--here{background:#dcfce7;color:#15803d}
@@ -1139,6 +1199,11 @@ function DataStyles() {
     .data-item-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#252a34}
     .data-item-title i{color:#a1a7b1}
     .data-item-time{color:#9aa1ac;font-size:10.5px;white-space:nowrap}
+    .data-item-id{font-family:ui-monospace,Consolas,monospace;font-size:10.5px;color:#6b7280;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:2px 6px;white-space:nowrap;cursor:copy;text-align:left;user-select:all}
+    .data-item-id:hover{background:#eef2ff;border-color:#c7d2fe;color:#4338ca}
+    .data-store-filter{display:flex;align-items:center;gap:8px;padding:8px 0 6px;color:#8d95a1}
+    .data-store-filter .data-find-input{padding:7px 10px;font-size:12px}
+    .data-store-filter .data-hint{white-space:nowrap;font-variant-numeric:tabular-nums}
     .data-item-size{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;color:#252a34}
     .data-badge{font-size:9.5px;font-weight:700;padding:3px 6px;border-radius:99px;text-align:center;border:1px solid transparent;font-family:inherit;cursor:pointer;transition:box-shadow .12s,filter .12s}
     .data-badge:hover{filter:brightness(.95);box-shadow:0 0 0 2px rgba(99,102,241,.22);border-color:transparent}
