@@ -31,13 +31,15 @@ struct QualityCfg {
     video: Mutex<u32>,
 }
 
-// ẢNH mặc định 4K: vì không bao giờ phóng to, mức này có nghĩa là "không thu nhỏ gì cả" —
-// ảnh chụp giữ đúng từng pixel của màn hình dù màn to tới đâu. Máy 1080p/1440p không đổi gì
-// so với mức 2K cũ (đằng nào cũng chẳng có gì để thu), chỉ màn 4K là hết bị cắt mất chi tiết.
-pub const DEFAULT_IMAGE_QUALITY: u32 = 2160;
-// VIDEO vẫn mặc định 2K: quay 4K nặng gấp bội cả lúc mã hoá lẫn lúc gửi đi, nên để người
-// dùng tự chọn chứ không bật sẵn.
-pub const DEFAULT_VIDEO_QUALITY: u32 = 1440;
+// Mặc định: ẢNH 2K, VIDEO Full HD. Chỉ áp cho máy chưa từng chọn mức nào (chưa có quality.cfg);
+// đã chọn trong Cài đặt thì file đó luôn thắng.
+//
+// Ảnh 2K: màn 1080p/1440p giữ nguyên từng pixel và vẫn lưu lossless (từ mức 2K trở lên, xem
+// webpQuality ở lib/flatten.ts). Chỉ màn 4K là bị thu còn 1440p — ai cần giữ hết thì chọn 4K.
+pub const DEFAULT_IMAGE_QUALITY: u32 = 1440;
+// Video Full HD: nén crf 24 thay vì 20 của mức 2K (crf_for ở record.rs) nên file nhẹ hơn ~1,6
+// lần, gửi đi nhanh hơn; màn lớn hơn 1080p thì video bị thu về 1080p.
+pub const DEFAULT_VIDEO_QUALITY: u32 = 1080;
 const QUALITY_CHOICES: [u32; 4] = [720, 1080, 1440, 2160];
 
 fn quality_file(app: &AppHandle) -> Option<std::path::PathBuf> {
