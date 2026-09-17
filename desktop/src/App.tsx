@@ -58,6 +58,7 @@ import {
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ImagePreview } from "./components/ImagePreview";
 import "./App.css";
 
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage" | "data";
@@ -278,10 +279,6 @@ function App() {
   // Màn hình kết quả
   const [preview, setPreview] = useState<string | null>(null);
   const [previewType, setPreviewType] = useState<"image" | "video">("image");
-  // Xem ảnh kết quả ở kích thước thật (1:1). Mặc định thu vừa khung nên ảnh 1080p bị
-  // trình duyệt co lại ~0,65× → chữ nhỏ bết; bấm vào ảnh để xem đúng từng pixel.
-  const [previewFull, setPreviewFull] = useState(false);
-  useEffect(() => setPreviewFull(false), [preview]);
   const [uploading, setUploading] = useState(false);
   const [link, setLink] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -1653,7 +1650,9 @@ function App() {
 
   if (screen === "result") {
     return (
-      <main className="container">
+      // Xem ảnh thì khung cao đúng bằng cửa sổ và chỉ riêng ảnh cuộn (xem ImagePreview). Video
+      // giữ bố cục cũ: trình cắt video + khung video cần trang cuộn tự nhiên.
+      <main className={preview && previewType === "image" ? "container container--viewer" : "container"}>
         {toast && <div className="toast">{toast}</div>}
 
         {DownloadOverlay}
@@ -1779,29 +1778,23 @@ function App() {
         {uploading && <p className="hint">Đang tải {previewType === "video" ? "video" : "ảnh"} lên Cloudflare R2…</p>}
         {uploadError && <p className="error">Lỗi: {uploadError}</p>}
 
-        {preview && (
-          <div className={previewFull ? "preview preview--full" : "preview"}>
-            {previewType === "video" ? (
-              <video
-                ref={videoElRef}
-                src={preview}
-                controls
-                autoPlay
-                muted
-                onLoadedMetadata={(e) => {
-                  const d = e.currentTarget.duration;
-                  if (isFinite(d) && d > 0) { setVideoDuration(d); setTrimStart(0); setTrimEnd(d); }
-                }}
-              />
-            ) : (
-              <img
-                src={preview}
-                alt="Ảnh đã gộp khung + note"
-                title={previewFull ? "Bấm để thu vừa khung" : "Bấm để xem kích thước thật"}
-                onClick={() => setPreviewFull((v) => !v)}
-              />
-            )}
+        {preview && previewType === "video" && (
+          <div className="preview">
+            <video
+              ref={videoElRef}
+              src={preview}
+              controls
+              autoPlay
+              muted
+              onLoadedMetadata={(e) => {
+                const d = e.currentTarget.duration;
+                if (isFinite(d) && d > 0) { setVideoDuration(d); setTrimStart(0); setTrimEnd(d); }
+              }}
+            />
           </div>
+        )}
+        {preview && previewType === "image" && (
+          <ImagePreview key={preview} src={preview} alt="Ảnh đã gộp khung + note" />
         )}
       </main>
     );

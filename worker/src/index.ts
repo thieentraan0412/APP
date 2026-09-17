@@ -1388,10 +1388,35 @@ const routes = {
 function seek(d){var v=document.getElementById('vid');if(!v)return;var t=v.currentTime+d;v.currentTime=Math.max(0,Math.min(v.duration||1e9,t));}
 document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);else if(e.key==='ArrowRight')seek(5);else if(e.key==='j')seek(-10);else if(e.key==='l')seek(10);});
 </script>`
-          : `<img id="pic" src="${fileSrc}" title="Bấm để xem kích thước thật"/>
-<p class="hint">Bấm vào ảnh để xem đúng kích thước thật · bấm lần nữa để thu vừa màn hình</p>
+          : `<p class="hint" id="hint" style="display:none"></p>
+<img id="pic" src="${fileSrc}"/>
 <script>
-document.getElementById('pic').addEventListener('click',function(){document.body.classList.toggle('full');});
+(function(){
+  var pic=document.getElementById('pic'),hint=document.getElementById('hint'),b=document.body;
+  // '' = vừa chiều ngang (mặc định; ảnh không rộng hơn màn hình thì chính là 1:1)
+  // 'full' = kích thước thật, cho ảnh rộng hơn màn hình (xem trên laptop, ảnh chụp màn 2K/4K)
+  // 'whole' = thu cả ảnh vào màn hình để nhìn tổng thể, cho ảnh đã 1:1 mà cao hơn màn hình
+  function mode(){return b.classList.contains('full')?'full':b.classList.contains('whole')?'whole':'';}
+  // Bấm vào ảnh thì sang đâu: từ chế độ phụ luôn quay về mặc định; null = ảnh nằm gọn, không có gì để đổi
+  function next(){
+    if(mode())return '';
+    if(pic.naturalWidth>document.documentElement.clientWidth)return 'full';
+    if(pic.naturalHeight>window.innerHeight)return 'whole';
+    return null;
+  }
+  function sync(){
+    var n=next(),m=mode(),t;
+    if(n===null){hint.style.display='none';pic.style.cursor='default';pic.title='';return;}
+    if(m==='full'){t='Đang xem kích thước thật · bấm vào ảnh để thu lại vừa chiều ngang';pic.style.cursor='zoom-out';}
+    else if(m==='whole'){t='Đang thu nhỏ để xem toàn ảnh nên chữ nhỏ sẽ mờ · bấm vào ảnh để xem lại đúng kích thước';pic.style.cursor='zoom-in';}
+    else if(n==='full'){t='Ảnh rộng hơn màn hình nên đang được thu vừa chiều ngang · bấm vào ảnh để xem đúng kích thước thật';pic.style.cursor='zoom-in';}
+    else{t='Đang hiển thị đúng kích thước thật · cuộn xuống để xem tiếp, hoặc bấm vào ảnh để thu toàn ảnh vừa màn hình';pic.style.cursor='zoom-out';}
+    hint.textContent=t;pic.title=t;hint.style.display='';
+  }
+  pic.addEventListener('click',function(){var n=next();if(n===null)return;b.classList.remove('full','whole');if(n)b.classList.add(n);sync();});
+  if(pic.complete&&pic.naturalWidth)sync();else pic.addEventListener('load',sync);
+  window.addEventListener('resize',sync);
+})();
 </script>`;
 
       const html = `<!doctype html>
@@ -1403,12 +1428,25 @@ document.getElementById('pic').addEventListener('click',function(){document.body
   .skip{display:flex;gap:8px;margin-top:12px}
   .skip button{cursor:pointer;background:#1f2937;color:#fff;border:1px solid #374151;border-radius:8px;padding:8px 14px;font-size:14px}
   .skip button:hover{background:#374151}
-  #pic{max-width:100%;max-height:90vh;cursor:zoom-in}
-  .hint{color:#9ca3af;font-size:12px;margin:10px 0 0}
-  /* 1:1 — canh về góc trên-trái để cuộn tới được mọi mép; canh giữa thì phần tràn bên trái bị cắt */
+  /* Ảnh mặc định VỪA CHIỀU NGANG, KHÔNG chặn chiều cao. Trước đây max-height:90vh: cửa sổ trình
+     duyệt 1080p chỉ còn ~924px sau thanh tab + thanh địa chỉ, nên ảnh chụp 1920x1080 bị ép còn
+     1478x832 (co 0,77) và chữ nhỏ nhòe hẳn — đo lại bằng Lanczos cũng chỉ đỡ chút xíu, vì co
+     1920px vào 1478px là mất thông tin thật. Giờ ảnh không rộng hơn màn hình thì hiện đúng 1:1,
+     cao hơn thì cuộn. */
+  #pic{max-width:100%}
+  /* Giấu thanh cuộn của trang ảnh: thanh cuộn dọc ăn ~17px bề ngang, đủ để ảnh 1920px trên màn
+     1920px bị co còn 0,99 — co lẻ như vậy vẫn nội suy lại mọi cột và làm nhòe chữ theo từng dải.
+     Cuộn bằng chuột / phím / cảm ứng vẫn bình thường. Trình duyệt chưa hỗ trợ :has() thì chỉ
+     đơn giản là vẫn còn thanh cuộn. */
+  html:has(#pic){scrollbar-width:none}
+  html:has(#pic)::-webkit-scrollbar{display:none}
+  .hint{color:#9ca3af;font-size:12px;margin:10px 16px;text-align:center}
+  /* Kích thước thật — canh về góc trên-trái để cuộn tới được mọi mép; canh giữa thì phần tràn bên trái bị cắt */
   body.full{justify-content:flex-start;align-items:flex-start}
-  body.full h1,body.full .hint{margin-left:16px}
-  body.full #pic{max-width:none;max-height:none;cursor:zoom-out}
+  body.full h1{margin-left:16px}
+  body.full #pic{max-width:none}
+  /* Thu toàn ảnh vào màn hình — chỉ để nhìn tổng thể; chừa chỗ cho dòng gợi ý */
+  body.whole #pic{max-height:calc(100vh - 60px)}
 </style></head>
 <body>
 ${heading}${media}
