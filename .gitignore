@@ -39,3 +39,7 @@ yarn-error.log*
 Thumbs.db
 .vscode/*
 !.vscode/extensions.json
+
+# ===== Cấu hình cargo riêng của máy dev (target-dir ra ngoài OneDrive) =====
+# KHÔNG commit: CI dùng target-dir mặc định + Swatinem/rust-cache.
+desktop/src-tauri/.cargo/

@@ -1388,32 +1388,26 @@ const routes = {
 function seek(d){var v=document.getElementById('vid');if(!v)return;var t=v.currentTime+d;v.currentTime=Math.max(0,Math.min(v.duration||1e9,t));}
 document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);else if(e.key==='ArrowRight')seek(5);else if(e.key==='j')seek(-10);else if(e.key==='l')seek(10);});
 </script>`
-          : `<p class="hint" id="hint" style="display:none"></p>
+          : `<p class="hint" id="hint" style="visibility:hidden"></p>
 <img id="pic" src="${fileSrc}"/>
 <script>
 (function(){
   var pic=document.getElementById('pic'),hint=document.getElementById('hint'),b=document.body;
-  // '' = vừa chiều ngang (mặc định; ảnh không rộng hơn màn hình thì chính là 1:1)
-  // 'full' = kích thước thật, cho ảnh rộng hơn màn hình (xem trên laptop, ảnh chụp màn 2K/4K)
-  // 'whole' = thu cả ảnh vào màn hình để nhìn tổng thể, cho ảnh đã 1:1 mà cao hơn màn hình
-  function mode(){return b.classList.contains('full')?'full':b.classList.contains('whole')?'whole':'';}
-  // Bấm vào ảnh thì sang đâu: từ chế độ phụ luôn quay về mặc định; null = ảnh nằm gọn, không có gì để đổi
-  function next(){
-    if(mode())return '';
-    if(pic.naturalWidth>document.documentElement.clientWidth)return 'full';
-    if(pic.naturalHeight>window.innerHeight)return 'whole';
-    return null;
+  // Mặc định: cả ảnh nằm gọn trong màn hình. Bấm vào ảnh: xem đúng kích thước thật (cuộn được).
+  // Chỉ ảnh phải thu nhỏ mới có gì để đổi — ảnh đã lọt màn hình thì bấm không làm gì.
+  // Đo theo khung của chế độ mặc định nên kết quả không đổi khi đang ở kích thước thật.
+  function shrinks(){
+    var c=parseFloat(getComputedStyle(b).getPropertyValue('--chrome'))||68;
+    return pic.naturalWidth>document.documentElement.clientWidth-32||pic.naturalHeight>window.innerHeight-c;
   }
   function sync(){
-    var n=next(),m=mode(),t;
-    if(n===null){hint.style.display='none';pic.style.cursor='default';pic.title='';return;}
-    if(m==='full'){t='Đang xem kích thước thật · bấm vào ảnh để thu lại vừa chiều ngang';pic.style.cursor='zoom-out';}
-    else if(m==='whole'){t='Đang thu nhỏ để xem toàn ảnh nên chữ nhỏ sẽ mờ · bấm vào ảnh để xem lại đúng kích thước';pic.style.cursor='zoom-in';}
-    else if(n==='full'){t='Ảnh rộng hơn màn hình nên đang được thu vừa chiều ngang · bấm vào ảnh để xem đúng kích thước thật';pic.style.cursor='zoom-in';}
-    else{t='Đang hiển thị đúng kích thước thật · cuộn xuống để xem tiếp, hoặc bấm vào ảnh để thu toàn ảnh vừa màn hình';pic.style.cursor='zoom-out';}
-    hint.textContent=t;pic.title=t;hint.style.display='';
+    if(!shrinks()){b.classList.remove('full');hint.style.visibility='hidden';pic.style.cursor='default';pic.title='';return;}
+    var full=b.classList.contains('full');
+    var t=full?'Đang xem đúng kích thước thật · bấm vào ảnh để thu lại vừa màn hình'
+              :'Ảnh lớn hơn màn hình nên đang được thu cho vừa · bấm vào ảnh để xem đúng kích thước thật';
+    pic.style.cursor=full?'zoom-out':'zoom-in';hint.textContent=t;pic.title=t;hint.style.visibility='visible';
   }
-  pic.addEventListener('click',function(){var n=next();if(n===null)return;b.classList.remove('full','whole');if(n)b.classList.add(n);sync();});
+  pic.addEventListener('click',function(){if(!shrinks())return;b.classList.toggle('full');sync();});
   if(pic.complete&&pic.naturalWidth)sync();else pic.addEventListener('load',sync);
   window.addEventListener('resize',sync);
 })();
@@ -1428,27 +1422,27 @@ document.addEventListener('keydown',function(e){if(e.key==='ArrowLeft')seek(-5);
   .skip{display:flex;gap:8px;margin-top:12px}
   .skip button{cursor:pointer;background:#1f2937;color:#fff;border:1px solid #374151;border-radius:8px;padding:8px 14px;font-size:14px}
   .skip button:hover{background:#374151}
-  /* Ảnh mặc định VỪA CHIỀU NGANG, KHÔNG chặn chiều cao. Trước đây max-height:90vh: cửa sổ trình
-     duyệt 1080p chỉ còn ~924px sau thanh tab + thanh địa chỉ, nên ảnh chụp 1920x1080 bị ép còn
-     1478x832 (co 0,77) và chữ nhỏ nhòe hẳn — đo lại bằng Lanczos cũng chỉ đỡ chút xíu, vì co
-     1920px vào 1478px là mất thông tin thật. Giờ ảnh không rộng hơn màn hình thì hiện đúng 1:1,
-     cao hơn thì cuộn. */
-  #pic{max-width:100%}
+  /* Trang ảnh: mặc định THU CẢ ẢNH VỪA MÀN HÌNH — mở link ra là thấy trọn ảnh, không tràn kín
+     màn hình và không phải cuộn. Ảnh nhỏ hơn khung thì giữ nguyên 1:1, không phóng to. Muốn chữ
+     sắc nét đúng từng điểm ảnh thì bấm vào ảnh để sang kích thước thật (body.full).
+     --chrome = phần chiều cao không dành cho ảnh: padding + dòng gợi ý (+ tiêu đề nếu có). */
+  body.img{height:100vh;box-sizing:border-box;padding:16px;overflow:hidden;--chrome:68px}
+  body.img.titled{--chrome:116px}
+  #pic{max-width:100%;max-height:calc(100vh - var(--chrome, 68px))}
   /* Giấu thanh cuộn của trang ảnh: thanh cuộn dọc ăn ~17px bề ngang, đủ để ảnh 1920px trên màn
      1920px bị co còn 0,99 — co lẻ như vậy vẫn nội suy lại mọi cột và làm nhòe chữ theo từng dải.
      Cuộn bằng chuột / phím / cảm ứng vẫn bình thường. Trình duyệt chưa hỗ trợ :has() thì chỉ
      đơn giản là vẫn còn thanh cuộn. */
   html:has(#pic){scrollbar-width:none}
   html:has(#pic)::-webkit-scrollbar{display:none}
-  .hint{color:#9ca3af;font-size:12px;margin:10px 16px;text-align:center}
+  /* Dòng gợi ý neo đáy màn hình, không nằm trong luồng nên không chen vào khung ảnh */
+  .hint{position:fixed;left:0;right:0;bottom:0;margin:0;padding:8px 16px;color:#9ca3af;font-size:12px;text-align:center;background:rgba(17,17,17,.85)}
   /* Kích thước thật — canh về góc trên-trái để cuộn tới được mọi mép; canh giữa thì phần tràn bên trái bị cắt */
-  body.full{justify-content:flex-start;align-items:flex-start}
-  body.full h1{margin-left:16px}
-  body.full #pic{max-width:none}
-  /* Thu toàn ảnh vào màn hình — chỉ để nhìn tổng thể; chừa chỗ cho dòng gợi ý */
-  body.whole #pic{max-height:calc(100vh - 60px)}
+  body.img.full{height:auto;min-height:100vh;padding:0;overflow:auto;justify-content:flex-start;align-items:flex-start}
+  body.img.full h1{margin-left:16px}
+  body.img.full #pic{max-width:none;max-height:none}
 </style></head>
-<body>
+<body class="${row.type === "video" ? "" : "img" + (title ? " titled" : "")}">
 ${heading}${media}
 </body></html>`;
       return new Response(html, {
