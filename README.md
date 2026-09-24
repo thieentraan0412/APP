@@ -42,7 +42,8 @@ tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại:
 - Tự copy link vào clipboard sau khi lưu
 - Trang xem link có sẵn cho người nhận, không cần cài gì; bấm vào ảnh để xem đúng kích thước
   thật 1:1 (màn kết quả trong app cũng vậy)
-- Lưu file về máy thay vì đăng lên (với video)
+- Lưu file vào máy thay vì đăng lên cloud — cả ảnh (nút **Lưu vào máy** cạnh nút Lưu, hoặc
+  `Ctrl + Shift + S`) lẫn video
 
 ## 4. Thư viện
 

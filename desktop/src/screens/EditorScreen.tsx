@@ -163,6 +163,14 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       const t = e.target as HTMLElement | null;
       const inField = !!(t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable));
 
+      // Ctrl/Cmd+Shift+S: lưu file ảnh vào máy, không đăng cloud. Phải bắt TRƯỚC Ctrl+S bên
+      // dưới: điều kiện của Ctrl+S cũng khớp khi đang giữ Shift, để sau là lại đăng lên cloud.
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.code === "KeyS" || e.key.toLowerCase() === "s")) {
+        e.preventDefault();
+        saveToDisk();
+        return;
+      }
+
       // Ctrl/Cmd+S: LUÔN lưu (flatten → upload R2 → cấp link), kể cả khi con trỏ đang ở
       // ô "Tiêu đề". Trước đây phím tắt bị chặn khi focus trong input nên bấm Ctrl+S lúc
       // đang gõ tiêu đề sẽ không lưu gì → người dùng tưởng app không tự lưu.
@@ -554,7 +562,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
       });
       if (!dst) return; // người dùng bấm Huỷ — không phải lỗi, đừng báo gì
       await invoke("save_image_to_path", { dataUrl, dst });
-      setCopyMsg("Đã lưu ảnh về máy ✓");
+      setCopyMsg("Đã lưu ảnh vào máy ✓");
     } catch (err) {
       setCopyMsg("Lưu thất bại: " + String(err));
     } finally {

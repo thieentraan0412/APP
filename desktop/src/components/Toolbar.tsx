@@ -314,11 +314,6 @@ export function Toolbar(props: Props) {
                 <IconEyedrop />
                 Hút màu
               </button>
-              <div className="tb-menu-sep" />
-              <button onClick={() => runMore(onSaveLocal)} disabled={savingLocal} title="Lưu file ảnh xuống máy, không đăng lên cloud">
-                <IconDownload />
-                {savingLocal ? "Đang lưu…" : "Lưu về máy"}
-              </button>
             </div>
           )}
         </div>
@@ -332,7 +327,17 @@ export function Toolbar(props: Props) {
           onChange={(e) => setTitle(e.target.value)}
         />
         <button onClick={onBack} title="Quay lại (Esc)">← <span className="tb-txt">Quay lại</span></button>
-        <button className="primary" onClick={onSave} disabled={saving}>
+        {/* Trước đây nằm khuất trong menu ⋮ Thêm, sau "Đo kích thước" với "Hút màu" — có mà như
+            không. Đặt cạnh nút Lưu để thấy ngay có hai cách lưu. */}
+        <button
+          onClick={onSaveLocal}
+          disabled={savingLocal}
+          title="Lưu file ảnh vào máy — không đăng lên cloud, không tạo link (Ctrl+Shift+S)"
+        >
+          <IconDownload />
+          <span className="tb-txt">{savingLocal ? "Đang lưu…" : "Lưu vào máy"}</span>
+        </button>
+        <button className="primary" onClick={onSave} disabled={saving} title="Đăng lên cloud và lấy link chia sẻ (Ctrl+S)">
           {saving ? "Đang lưu…" : "💾 Lưu"}
         </button>
       </div>
