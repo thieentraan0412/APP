@@ -548,6 +548,20 @@ kbd {
   flex-wrap: wrap;
 }
 
+/* Phiên bản đang chạy, dạt về mép phải hàng nút. Để chọn/copy được: báo lỗi hay cần gửi kèm. */
+.settings-version {
+  margin-left: auto;
+  align-self: center;
+  font-size: 0.85rem;
+  color: var(--text-soft);
+  user-select: text;
+}
+
+.settings-version b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Tài khoản */
 .account-row {
   display: flex;

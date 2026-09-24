@@ -20,6 +20,8 @@ interface Props {
   onBack: () => void;
   onCheckUpdate: () => void;
   updateChecking: boolean;
+  /** Phiên bản app đang chạy; null = chưa đọc được (khi đó không hiện gì). */
+  appVersion: string | null;
   userEmail: string;
   onLogout: () => void;
 }
@@ -217,7 +219,7 @@ const DEFAULT_KEYS: Keys = {
   regionRecord: "Control+Shift+4",
 };
 
-export function SettingsScreen({ capture, record, region, pause, regionRecord, onSave, imageQuality, videoQuality, onSaveQuality, captureSizes, onBack, onCheckUpdate, updateChecking, userEmail, onLogout }: Props) {
+export function SettingsScreen({ capture, record, region, pause, regionRecord, onSave, imageQuality, videoQuality, onSaveQuality, captureSizes, onBack, onCheckUpdate, updateChecking, appVersion, userEmail, onLogout }: Props) {
   const [keys, setKeys] = useState<Keys>({ capture, record, region, pause, regionRecord });
   const [saving, setSaving] = useState(false);
   const [hint, setHint] = useState<string | null>(null);
@@ -424,6 +426,11 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
             <button onClick={onCheckUpdate} disabled={updateChecking}>
               {updateChecking ? "Đang kiểm tra…" : "Kiểm tra cập nhật"}
             </button>
+            {appVersion && (
+              <span className="settings-version">
+                Phiên bản hiện tại <b>v{appVersion}</b>
+              </span>
+            )}
           </div>
         </section>
 

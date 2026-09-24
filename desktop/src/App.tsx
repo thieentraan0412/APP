@@ -57,6 +57,7 @@ import {
 } from "./lib/archive";
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
+import { getVersion } from "@tauri-apps/api/app";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { ImagePreview } from "./components/ImagePreview";
 import "./App.css";
@@ -261,6 +262,9 @@ function App() {
   // Tự động cập nhật
   const [update, setUpdate] = useState<Update | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
+  // Phiên bản của bản app ĐANG CHẠY (tauri.conf.json lúc build) — đúng con số bộ cập nhật đem
+  // ra so, nên không đọc package.json của frontend (hai chỗ có thể lệch nhau).
+  const [appVersion, setAppVersion] = useState<string | null>(null);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null); // null = chưa tải
   const [updateDismissed, setUpdateDismissed] = useState(false);
 
@@ -442,6 +446,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {}); // không đọc được thì chỉ đơn giản là không hiện
+  }, []);
+
+  useEffect(() => {
     invoke<[number, number, number, number]>("capture_sizes")
       .then(setCaptureSizes)
       .catch(() => {}); // không đọc được thì Cài đặt chỉ bớt phần gợi ý px
@@ -564,7 +572,7 @@ function App() {
         setUpdate(u);
         setUpdateDismissed(false);
       } else {
-        showToast("Bạn đang dùng bản mới nhất");
+        showToast(appVersion ? `Bạn đang dùng bản mới nhất (v${appVersion})` : "Bạn đang dùng bản mới nhất");
       }
     } finally {
       setUpdateChecking(false);
@@ -1637,6 +1645,7 @@ function App() {
               onBack={backHome}
               onCheckUpdate={manualCheckUpdate}
               updateChecking={updateChecking}
+              appVersion={appVersion}
               userEmail={user.email}
               onLogout={handleLogout}
             />
