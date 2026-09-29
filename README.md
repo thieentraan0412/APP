@@ -16,9 +16,10 @@ tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại:
 - Cắt video (chọn đoạn cần giữ) trước khi lưu
 - Dán ảnh từ clipboard (Ctrl + V) vào thẳng trình chỉnh sửa
 - Đổi được mọi phím tắt trong phần Cài đặt
-- Chọn mức chất lượng ảnh / video trong Cài đặt (720p · Full HD · 2K) — mức 2K lưu ảnh
-  WebP không nén mất dữ liệu, đúng từng pixel; video ở mức cao hơn nén nhẹ hơn (nét hơn,
-  file nặng hơn — mức 2K nặng ~2,5 lần mức 720p)
+- Chọn độ phân giải ảnh / video trong Cài đặt: 720p (1280×720) · Full HD (1920×1080) ·
+  2K/QHD (2560×1440) · 4K/UHD (3840×2160). Mặc định đúng độ phân giải màn hình (**Native**).
+  Mức cao hơn màn hình là **Upscale**: file ra đúng số pixel đó nhưng chỉ là phóng to, không
+  nét hơn và nặng hơn nhiều. Ảnh ở mức ≥ màn hình lưu WebP không nén mất dữ liệu
 
 ## 2. Chú thích ảnh
 

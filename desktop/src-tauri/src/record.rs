@@ -64,6 +64,9 @@ struct Session {
     // vì lý do y hệt `crop`: người dùng đổi Cài đặt giữa chừng mà đoạn sau ra độ phân giải
     // khác thì nối bằng `-c copy` sẽ thất bại, mất trắng bản quay.
     max_h: u32,
+    // Chiều cao nguồn để UPSCALE từ đó (0 = không upscale), chốt cùng lúc với max_h và vì đúng
+    // lý do đó: đổi giữa phiên thì các đoạn khác độ phân giải, không nối được.
+    up_from: u32,
     // Tổng thời lượng các đoạn ĐÃ đóng (ms) — dùng để chặn ở MAX_RECORD_MS.
     elapsed_ms: u64,
     // Mốc bắt đầu đoạn đang quay; None khi đang tạm dừng (lúc đó không cộng thời gian).
@@ -106,6 +109,26 @@ pub fn crf_for(max_h: u32) -> &'static str {
     }
 }
 
+// Chiều ngang tối đa khi UPSCALE video. H.264 chuẩn tới 4096px; ghép nhiều màn hình rồi phóng
+// to sẽ vượt xa (hai màn 1080p cạnh nhau lên 4K = 7680×2160): mã hoá không kịp thời gian thực
+// và nhiều trình phát không mở nổi. Cài đặt khoá các mức đó (VIDEO_MAX_W trong
+// SettingsScreen.tsx) — sửa thì sửa cả hai.
+pub const VIDEO_UPSCALE_MAX_W: u64 = 4096;
+
+// Upscale từ chiều cao nào (0 = không upscale): chỉ khi mức chọn cao hơn toàn bộ vùng quay
+// (hộp bao mọi màn hình — gdigrab thu cả virtual desktop) và video ra không rộng quá giới hạn.
+fn upscale_source(vw: u32, vh: u32, max_h: u32) -> u32 {
+    if vh == 0 || max_h <= vh {
+        return 0;
+    }
+    let out_w = (vw as u64 * max_h as u64 / vh as u64) / 2 * 2;
+    if out_w > VIDEO_UPSCALE_MAX_W { 0 } else { vh }
+}
+
+fn upscale_from(max_h: u32) -> u32 {
+    crate::capture::virtual_desktop_size().map_or(0, |(vw, vh)| upscale_source(vw, vh, max_h))
+}
+
 // Spawn ffmpeg quay 1 đoạn ra file `out`. Thử lại nhiều lần vì ngay sau khi tải,
 // Windows Defender có thể đang quét & khóa ffmpeg.exe (os error 32).
 fn spawn_segment(
@@ -114,6 +137,7 @@ fn spawn_segment(
     out: &PathBuf,
     crop: Option<&Crop>,
     max_h: u32,
+    up_from: u32,
 ) -> Result<Child, String> {
     let out_str = out.to_string_lossy().to_string();
     let mut args: Vec<String> = vec![
@@ -144,7 +168,14 @@ fn spawn_segment(
     // - Chiều rộng -2 = tự suy theo tỉ lệ và LÀM TRÒN VỀ SỐ CHẴN, bắt buộc với libx264 +
     //   yuv420p (cạnh lẻ là ffmpeg chết ngay lúc khởi động); trunc(../2)*2 lo nốt chiều
     //   cao, vì giữ nguyên ih của một màn hình cao lẻ cũng ra cạnh lẻ y như vậy.
-    if max_h > 0 {
+    // Mức cao hơn màn hình → UPSCALE đúng tỉ lệ max_h/up_from: toàn màn hình 1920×1080 ở mức 4K
+    // ra đúng 3840×2160, quay vùng thì vùng to gấp đôi. Viết dạng phân số chứ không nhân số
+    // thập phân: 1080·1,3333 = 1439,99 → trunc ra 1438 thay vì 1440.
+    if max_h > 0 && up_from > 0 {
+        filters.push(format!(
+            "scale=trunc(iw*{max_h}/{up_from}/2)*2:trunc(ih*{max_h}/{up_from}/2)*2"
+        ));
+    } else if max_h > 0 {
         filters.push(format!("scale=-2:trunc(min({max_h}\\,ih)/2)*2"));
     }
     if !filters.is_empty() {
@@ -245,6 +276,7 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
     // Đọc mức chất lượng NGAY tại đây và giữ nguyên tới hết phiên — xem ghi chú ở
     // Session::max_h về việc mọi đoạn phải cùng độ phân giải mới nối được.
     let max_h = crate::video_quality(app);
+    let up_from = upscale_from(max_h);
     // Chạy trong thread để không treo UI khi lần đầu tải ffmpeg.
     let app = app.clone();
     std::thread::spawn(move || {
@@ -261,7 +293,7 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
         };
 
         let out = seg_path(0);
-        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref(), max_h) {
+        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref(), max_h, up_from) {
             Ok(mut child) => {
                 let generation = {
                     let st = app.state::<RecState>();
@@ -275,6 +307,7 @@ fn start(app: &AppHandle, crop: Option<Crop>) {
                     s.seg_index = 0;
                     s.crop = crop;
                     s.max_h = max_h;
+                    s.up_from = up_from;
                     s.busy = false; // khởi động xong
                     s.elapsed_ms = 0;
                     s.seg_started = Some(std::time::Instant::now());
@@ -373,14 +406,14 @@ fn resume(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let st = app.state::<RecState>();
-        let (ffmpeg, new_index, crop, max_h) = {
+        let (ffmpeg, new_index, crop, max_h, up_from) = {
             let mut s = st.inner.lock().unwrap();
             if !s.recording || !s.paused {
                 s.busy = false; // (H5)
                 return;
             }
             // Giữ nguyên vùng của phiên quay → mọi đoạn cùng độ phân giải để nối được.
-            (s.ffmpeg.clone(), s.seg_index + 1, s.crop, s.max_h)
+            (s.ffmpeg.clone(), s.seg_index + 1, s.crop, s.max_h, s.up_from)
         };
         let ffmpeg = match ffmpeg {
             Some(f) => f,
@@ -390,7 +423,7 @@ fn resume(app: &AppHandle) {
             }
         };
         let out = seg_path(new_index);
-        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref(), max_h) {
+        match spawn_segment(&app, &ffmpeg, &out, crop.as_ref(), max_h, up_from) {
             Ok(mut child) => {
                 {
                     let mut s = st.inner.lock().unwrap();
@@ -615,4 +648,24 @@ fn show_main(app: &AppHandle) {
         }
     }
     crate::focus_main(app);
+}
+
+#[cfg(test)]
+mod upscale_tests {
+    use super::upscale_source;
+
+    #[test]
+    fn chi_upscale_khi_muc_cao_hon_man_hinh() {
+        assert_eq!(upscale_source(1920, 1080, 2160), 1080); // 3840×2160
+        assert_eq!(upscale_source(1920, 1080, 1440), 1080); // 2560×1440
+        assert_eq!(upscale_source(1920, 1080, 1080), 0); // native
+        assert_eq!(upscale_source(1920, 1080, 720), 0); // thu nhỏ
+        assert_eq!(upscale_source(2560, 1440, 2160), 1440); // 3840×2160
+    }
+
+    #[test]
+    fn khong_upscale_video_rong_qua_4096() {
+        assert_eq!(upscale_source(3840, 1080, 1440), 0); // hai màn 1080p: 5120×1440
+        assert_eq!(upscale_source(3840, 1080, 2160), 0); // 7680×2160
+    }
 }

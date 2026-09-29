@@ -71,14 +71,36 @@ fn rgba_to_data_url(raw: &[u8], w: u32, h: u32) -> Result<String, String> {
     Ok(format!("data:image/png;base64,{}", b64))
 }
 
-// Thu nhỏ ảnh cho vừa mức chất lượng người dùng chọn trong Cài đặt (tính theo chiều cao).
-// Ảnh đã nhỏ hơn mức chọn thì GIỮ NGUYÊN: phóng to không thêm được chi tiết nào, chỉ làm
-// ảnh mờ và file nặng thêm. Vùng chọn nhỏ (vài trăm px) vì thế không bị đụng tới.
-fn fit_height(raw: Vec<u8>, w: u32, h: u32, max_h: u32) -> (Vec<u8>, u32, u32) {
-    if max_h == 0 || h <= max_h || w == 0 {
-        return (raw, w, h);
+// Kích thước đích của ảnh theo mức chất lượng đã chọn; None = giữ nguyên. `tier` = chiều cao
+// ĐÍCH (720 / 1080 / 1440 / 2160), `src_h` = chiều cao cả màn hình nguồn (ảnh toàn màn hình thì
+// chính là `h`).
+// - Mức ≤ màn hình: thu nhỏ để cao tối đa `tier` như trước — ảnh toàn màn hình ra đúng `tier`,
+//   vùng chọn vốn đã thấp hơn `tier` thì giữ nguyên.
+// - Mức > màn hình: UPSCALE đúng tỉ lệ tier/src_h — chọn 4K trên màn 1920×1080 thì ảnh toàn màn
+//   hình ra đúng 3840×2160, vùng chọn cũng to gấp đôi. Phóng to KHÔNG thêm chi tiết nào, nên
+//   Cài đặt ghi rõ "Upscale" để không ai tưởng đó là 4K thật.
+// Tách riêng khỏi phần resize để kiểm được bằng số thật; SettingsScreen.tsx (tierOutput) tính
+// y hệt để hiện đúng con số — sửa thì sửa cả hai.
+fn tier_size(w: u32, h: u32, tier: u32, src_h: u32) -> Option<(u32, u32)> {
+    if tier == 0 || w == 0 || h == 0 || src_h == 0 {
+        return None;
     }
-    let nw = ((w as f64) * (max_h as f64) / (h as f64)).round().max(1.0) as u32;
+    if tier > src_h {
+        // Tính bằng số nguyên, làm tròn: 1920·1440/1080 = 2560 tròn, không lệch vì số thực.
+        let up = |v: u32| ((v as u64 * tier as u64 + src_h as u64 / 2) / src_h as u64).max(1) as u32;
+        return Some((up(w), up(h)));
+    }
+    if h > tier {
+        let nw = ((w as f64) * (tier as f64) / (h as f64)).round().max(1.0) as u32;
+        return Some((nw, tier));
+    }
+    None
+}
+
+fn scale_to_tier(raw: Vec<u8>, w: u32, h: u32, tier: u32, src_h: u32) -> (Vec<u8>, u32, u32) {
+    let Some((nw, nh)) = tier_size(w, h, tier, src_h) else {
+        return (raw, w, h);
+    };
     // Mượn raw thay vì clone — ảnh 4K là ~33MB, nhân đôi chỉ để đổi kiểu là quá phí.
     let view: image::ImageBuffer<image::Rgba<u8>, &[u8]> =
         match image::ImageBuffer::from_raw(w, h, raw.as_slice()) {
@@ -86,9 +108,9 @@ fn fit_height(raw: Vec<u8>, w: u32, h: u32, max_h: u32) -> (Vec<u8>, u32, u32) {
             None => return (raw, w, h), // buffer không khớp kích thước → thôi, giữ ảnh gốc
         };
     // CatmullRom: nét hơn Triangle ở chữ nhỏ (ảnh chụp màn hình toàn chữ) mà vẫn nhanh
-    // hơn Lanczos3 đáng kể.
-    let out = image::imageops::resize(&view, nw, max_h, image::imageops::FilterType::CatmullRom);
-    (out.into_raw(), nw, max_h)
+    // hơn Lanczos3 đáng kể — dùng cho cả thu nhỏ lẫn phóng to.
+    let out = image::imageops::resize(&view, nw, nh, image::imageops::FilterType::CatmullRom);
+    (out.into_raw(), nw, nh)
 }
 
 fn copy_rgba_to_clipboard(raw: Vec<u8>, w: u32, h: u32) {
@@ -106,8 +128,8 @@ fn copy_rgba_to_clipboard(raw: Vec<u8>, w: u32, h: u32) {
 
 pub fn capture_primary_png_base64(max_h: u32) -> Result<String, String> {
     let (raw, w, h) = capture_primary_raw()?;
-    // Thu nhỏ TRƯỚC khi chép clipboard để ảnh dán ra ngoài giống hệt ảnh trong app.
-    let (raw, w, h) = fit_height(raw, w, h, max_h);
+    // Đổi cỡ TRƯỚC khi chép clipboard để ảnh dán ra ngoài giống hệt ảnh trong app.
+    let (raw, w, h) = scale_to_tier(raw, w, h, max_h, h);
     copy_rgba_to_clipboard(raw.clone(), w, h);
     rgba_to_data_url(&raw, w, h)
 }
@@ -151,6 +173,16 @@ pub fn capture_sizes() -> Result<(u32, u32, u32, u32), String> {
         (pw, ph)
     };
     Ok((pw, ph, vw, vh))
+}
+
+/// (rộng, cao) màn hình chính — nguồn của ảnh chụp.
+pub fn primary_size() -> Option<(u32, u32)> {
+    capture_sizes().ok().map(|(w, h, _, _)| (w, h))
+}
+
+/// (rộng, cao) hộp bao mọi màn hình — nguồn của video toàn màn hình (gdigrab thu cả desktop).
+pub fn virtual_desktop_size() -> Option<(u32, u32)> {
+    capture_sizes().ok().map(|(_, _, w, h)| (w, h))
 }
 
 #[tauri::command]
@@ -273,7 +305,9 @@ pub fn confirm_region_capture(
             cropped.extend_from_slice(&raw[start..start + cw as usize * 4]);
         }
 
-        let (cropped, cw, ch) = fit_height(cropped, cw, ch, crate::image_quality(&app));
+        // Upscale tính theo tỉ lệ của CẢ màn hình (full_h), không theo vùng: mức 4K trên màn
+        // 1080p thì vùng nào cũng to gấp đôi, khớp với con số Cài đặt hiện cho ảnh toàn màn hình.
+        let (cropped, cw, ch) = scale_to_tier(cropped, cw, ch, crate::image_quality(&app), full_h);
         copy_rgba_to_clipboard(cropped.clone(), cw, ch);
         rgba_to_data_url(&cropped, cw, ch)
     })();
@@ -393,4 +427,41 @@ fn to_virtual_crop(
         sw: (fw * ms.width as f64).round().max(1.0) as u32,
         sh: (fh * ms.height as f64).round().max(1.0) as u32,
     })
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::tier_size;
+
+    #[test]
+    fn toan_man_1080p_ra_dung_do_phan_giai_dich() {
+        assert_eq!(tier_size(1920, 1080, 720, 1080), Some((1280, 720)));
+        assert_eq!(tier_size(1920, 1080, 1080, 1080), None); // native: giữ nguyên
+        assert_eq!(tier_size(1920, 1080, 1440, 1080), Some((2560, 1440))); // Upscale
+        assert_eq!(tier_size(1920, 1080, 2160, 1080), Some((3840, 2160))); // Upscale
+    }
+
+    #[test]
+    fn man_4k_va_man_2k() {
+        assert_eq!(tier_size(3840, 2160, 2160, 2160), None);
+        assert_eq!(tier_size(3840, 2160, 1440, 2160), Some((2560, 1440)));
+        assert_eq!(tier_size(3840, 2160, 1080, 2160), Some((1920, 1080)));
+        assert_eq!(tier_size(2560, 1440, 1440, 1440), None);
+        assert_eq!(tier_size(2560, 1440, 2160, 1440), Some((3840, 2160)));
+    }
+
+    #[test]
+    fn man_chieu_cao_le_16_10() {
+        // 1920×1200 không trùng mức nào: Full HD thu nhỏ, 2K/4K upscale
+        assert_eq!(tier_size(1920, 1200, 1080, 1200), Some((1728, 1080)));
+        assert_eq!(tier_size(1920, 1200, 2160, 1200), Some((3456, 2160)));
+    }
+
+    #[test]
+    fn vung_chon_theo_ti_le_ca_man_hinh() {
+        // Vùng 700×400 trên màn 1080p: 4K → to gấp đôi; mức ≤ màn hình mà vùng đã thấp hơn → giữ
+        assert_eq!(tier_size(700, 400, 2160, 1080), Some((1400, 800)));
+        assert_eq!(tier_size(700, 400, 720, 1080), None);
+        assert_eq!(tier_size(1500, 900, 720, 1080), Some((1200, 720)));
+    }
 }

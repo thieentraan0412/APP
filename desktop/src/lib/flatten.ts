@@ -31,13 +31,16 @@ function losslessCap(pixels: number): number {
   return Math.max(LOSSLESS_CAP_MIN, (pixels / 1_000_000) * LOSSLESS_BUDGET_PER_MP);
 }
 
-// Mức nén WebP đi theo mức chất lượng người dùng chọn trong Cài đặt. Trước đây cố định
-// 0.85 cho MỌI mức: ảnh chụp màn hình toàn chữ nhỏ và nét mảnh nên ở 0.85 nhìn rõ bị bệt.
-// Người chọn 720p là đang ưu tiên file nhẹ nên giữ 0.85; từ 2K trở lên (kể cả 4K) thì không
-// nén mất dữ liệu nữa — đó mới là "nét nhất" thật sự chứ không phải 0.97.
-export function webpQuality(maxHeight: number): number {
-  if (maxHeight <= 720) return 0.85;
-  if (maxHeight <= 1080) return 0.92;
+// Mức nén WebP theo mức chất lượng đã chọn. LOSSLESS khi mức KHÔNG thu nhỏ ảnh — bằng hoặc
+// cao hơn màn hình (Native / Upscale): người dùng không hề đòi file nhẹ đi, và ảnh chụp màn
+// hình nén lossless vốn đã nhỏ. Chỉ nén mất dữ liệu khi họ chủ động chọn mức THẤP hơn màn hình
+// cho nhẹ: 720p → 0.85, Full HD → 0.92 (0.85 cho MỌI mức như hồi đầu thì chữ nhỏ bị bệt).
+// `screenH` = chiều cao màn hình chính; null (chưa đọc được) thì như trước: từ 2K là lossless.
+// Cài đặt cũng gọi hàm này để ghi đúng cách nén lên từng nút.
+export function webpQuality(tier: number, screenH: number | null = null): number {
+  if (screenH && tier >= screenH) return LOSSLESS;
+  if (tier <= 720) return 0.85;
+  if (tier <= 1080) return 0.92;
   return LOSSLESS;
 }
 

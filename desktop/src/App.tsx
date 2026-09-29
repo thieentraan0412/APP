@@ -65,10 +65,10 @@ import "./App.css";
 type Screen = "home" | "editor" | "result" | "library" | "settings" | "usage" | "data";
 
 const DEFAULT_SHORTCUTS = { capture: "Control+Shift+1", record: "Control+Shift+2", region: "Control+Shift+3", pause: "Control+Shift+H", regionRecord: "Control+Shift+4" };
-// Chất lượng = chiều CAO tối đa (px). Mặc định ảnh 2K, video Full HD. Phải khớp với
-// DEFAULT_IMAGE_QUALITY / DEFAULT_VIDEO_QUALITY bên src-tauri/src/lib.rs — Rust mới là bản
-// chính (lý do chọn mức nằm ở đó), đây chỉ là giá trị hiện tạm trước khi get_quality trả về.
-const DEFAULT_QUALITY = { image: 1440, video: 1080 };
+// Chất lượng = chiều CAO ĐÍCH của file (720 / 1080 / 1440 / 2160). Mặc định do Rust quyết theo
+// màn hình (native_tier ở src-tauri/src/lib.rs); đây chỉ là giá trị hiện tạm trước khi
+// get_quality trả về.
+const DEFAULT_QUALITY = { image: 1080, video: 1080 };
 const VIDEO_WARN_SECONDS = 120; // cảnh báo khi quay quá 2 phút
 // Trần độ dài một phiên quay. Rust mới là bên thực thi (MAX_RECORD_MS trong record.rs) —
 // hằng số này chỉ để hiển thị; sửa thì phải sửa cả hai cho khớp.
@@ -1517,6 +1517,7 @@ function App() {
           onBack={editId ? openLibrary : backHome}
           onSaved={handleSaved}
           imageQuality={quality.image}
+          screenHeight={captureSizes ? captureSizes[1] : null}
         />
 
         {DownloadOverlay}

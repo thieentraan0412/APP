@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { webpQuality } from "../lib/flatten";
 
 interface Props {
   capture: string;
@@ -118,38 +119,71 @@ function ShortcutCapture({
 // nén khác hẳn nhau nên hint tách riêng: ảnh từ 2K trở lên là lossless (lib/flatten.ts), còn
 // video luôn nén mất dữ liệu, chỉ nén nhẹ dần theo mức (crf_for trong record.rs).
 type QualityKind = "image" | "video";
-const QUALITY_OPTIONS: { value: number; label: string; hint: Record<QualityKind, string> }[] = [
-  {
-    value: 720, label: "720p",
-    hint: { image: "Cao tối đa 720px — file nhẹ nhất, gửi đi nhanh", video: "Cao tối đa 720px, nén mạnh — file nhẹ nhất, gửi đi nhanh" },
-  },
-  {
-    value: 1080, label: "Full HD",
-    hint: { image: "Cao tối đa 1080px — cân bằng giữa nét và nhẹ", video: "Cao tối đa 1080px, nén vừa — cân bằng giữa nét và nhẹ" },
-  },
-  {
-    value: 1440, label: "2K",
-    hint: { image: "Cao tối đa 1440px — không nén mất dữ liệu, nét tuyệt đối", video: "Cao tối đa 1440px, nén nhẹ nhất — nét nhất, file nặng hơn ~2,5 lần mức 720p" },
-  },
-  {
-    // Cao hơn mọi màn hình phổ thông → thực chất là "giữ nguyên, không thu nhỏ gì cả".
-    value: 2160, label: "4K",
-    hint: { image: "Giữ nguyên đúng từng pixel của màn hình, không thu nhỏ — nét nhất có thể", video: "Cao tối đa 2160px — chỉ hợp màn 4K, file rất nặng và mã hoá lâu hơn nhiều" },
-  },
+// Bốn mức = CHIỀU CAO ĐÍCH của file, theo quy ước 16:9: 720p = 1280×720, Full HD = 1920×1080,
+// 2K/QHD = 2560×1440, 4K/UHD = 3840×2160. Thấp hơn màn hình → thu nhỏ; bằng → Native; cao hơn
+// → UPSCALE thật. Trước đây mức chỉ là TRẦN chiều cao, nên trên màn 1080p nút "2K"/"4K" vẫn ghi
+// 1920×1080 — nhãn nói một đằng, file ra một nẻo.
+const QUALITY_OPTIONS: { value: number; label: string; std: string }[] = [
+  { value: 720, label: "720p", std: "720p (HD) 1280×720" },
+  { value: 1080, label: "Full HD", std: "Full HD 1920×1080" },
+  { value: 1440, label: "2K", std: "2K / QHD 2560×1440" },
+  { value: 2160, label: "4K", std: "4K / UHD 3840×2160" },
 ];
 
-// Kết quả thật của một mức trên nguồn cụ thể. Đây là phần quan trọng nhất của cả thẻ này:
-// trên màn 1080p, "Full HD", "2K" và "4K" cho ra ảnh CÙNG CỠ (đều 1920×1080, vì không bao
-// giờ phóng to) — thấy mấy con số bằng nhau thì người dùng hiểu ngay là màn hình mình
-// không đủ pixel, còn nếu chỉ có nhãn thì họ tưởng chọn 4K sẽ nét hơn. Khác biệt còn lại
-// giữa các mức là cách nén: từ 2K trở lên không nén mất dữ liệu (xem webpQuality trong
-// lib/flatten.ts), nên cùng cỡ mà vẫn nét hơn.
-function outSize(src: [number, number] | null, maxH: number): string | null {
+// Chiều ngang tối đa khi upscale video — khớp VIDEO_UPSCALE_MAX_W ở record.rs.
+const VIDEO_MAX_W = 4096;
+
+type TierMode = "down" | "native" | "up" | "blocked";
+type TierOut = { w: number; h: number; mode: TierMode };
+const TIER_TAG: Record<Exclude<TierMode, "down">, string> = { native: "Native", up: "Upscale", blocked: "Không hỗ trợ" };
+
+// Kích thước file THẬT của một mức trên nguồn cụ thể — tính y hệt phía Rust (tier_size ở
+// capture.rs cho ảnh, bộ lọc scale trong spawn_segment ở record.rs cho video; sửa thì sửa cả
+// hai) để con số trên nút đúng là file sẽ nhận. Video upscale ra rộng quá VIDEO_MAX_W thì
+// "blocked": Rust không upscale mà quay native, nên nút phải khoá chứ không được hứa suông.
+function tierOutput(src: [number, number] | null, tier: number, kind: QualityKind): TierOut | null {
   if (!src) return null;
-  const [w, h] = src;
-  if (w <= 0 || h <= 0) return null;
-  if (h <= maxH) return `${w}×${h}`;
-  return `${Math.round((w * maxH) / h)}×${maxH}`;
+  const [sw, sh] = src;
+  if (sw <= 0 || sh <= 0) return null;
+  const even = (v: number) => Math.trunc(v / 2) * 2;
+  if (tier > sh) {
+    if (kind === "video") {
+      const w = even((sw * tier) / sh);
+      const h = even((sh * tier) / sh);
+      return { w, h, mode: w > VIDEO_MAX_W ? "blocked" : "up" };
+    }
+    const up = (v: number) => Math.max(1, Math.floor((v * tier + Math.floor(sh / 2)) / sh));
+    return { w: up(sw), h: up(sh), mode: "up" };
+  }
+  if (tier === sh) {
+    return kind === "video" ? { w: even(sw), h: even(sh), mode: "native" } : { w: sw, h: sh, mode: "native" };
+  }
+  // Thu nhỏ: cao đúng `tier`, rộng theo tỉ lệ (video: ffmpeg "-2" làm tròn về số chẵn).
+  const w = (sw * tier) / sh;
+  return { w: kind === "video" ? 2 * Math.round(w / 2) : Math.round(w), h: tier, mode: "down" };
+}
+
+// Cách nén của mức đó — lấy thẳng từ nơi quyết định thật (webpQuality cho ảnh, crf_for ở
+// record.rs cho video) để tooltip không nói khác file.
+function compressionNote(tier: number, screenH: number | null, kind: QualityKind): string {
+  if (kind === "video") {
+    return tier <= 720 ? "nén mạnh (crf 28), file nhẹ nhất" : tier <= 1080 ? "nén vừa (crf 24)" : "nén nhẹ (crf 20)";
+  }
+  const q = webpQuality(tier, screenH);
+  return q >= 1 ? "ảnh lưu không nén mất dữ liệu" : `nén WebP ${q}${tier <= 720 ? ", file nhẹ nhất" : " cho nhẹ"}`;
+}
+
+function tierTitle(std: string, out: TierOut | null, src: [number, number] | null, tier: number, kind: QualityKind): string {
+  if (!out || !src) return `${std} — ${compressionNote(tier, null, kind)}`;
+  const [sw, sh] = src;
+  if (out.mode === "blocked") {
+    return `${std} — KHÔNG HỖ TRỢ: phóng to lên ${out.w}×${out.h} vượt giới hạn ${VIDEO_MAX_W}px chiều ngang của video H.264 (đang quay cả vùng ${sw}×${sh} của nhiều màn hình ghép lại)`;
+  }
+  const what =
+    out.mode === "native" ? "đúng độ phân giải màn hình (Native)"
+    : out.mode === "down" ? `thu nhỏ từ màn hình ${sw}×${sh}, ra ${out.w}×${out.h}`
+    : `UPSCALE từ màn hình ${sw}×${sh}: file ra đúng ${out.w}×${out.h} nhưng chỉ là phóng to — không thêm chi tiết nào, nặng hơn nhiều${kind === "video" ? ", mã hoá tốn CPU hơn" : ""}`;
+  return `${std} — ${what} — ${compressionNote(tier, sh, kind)}`;
 }
 
 function QualityPicker({
@@ -162,7 +196,7 @@ function QualityPicker({
 }: {
   label: string;
   value: number;
-  /** Ảnh hay video — chọn bộ hint cho đúng cách nén của loại đó. */
+  /** Ảnh hay video — cách tính kích thước (video làm tròn số chẵn) và cách nén khác nhau. */
   kind?: QualityKind;
   /** Nguồn để tính ra kích thước thật hiện dưới mỗi nút; null thì chỉ hiện nhãn. */
   source: [number, number] | null;
@@ -174,19 +208,22 @@ function QualityPicker({
       <span className="setting-label">{label}</span>
       <div className="segmented" role="group" aria-label={label}>
         {QUALITY_OPTIONS.map((o) => {
-          const out = outSize(source, o.value);
+          const out = tierOutput(source, o.value, kind);
           return (
             <button
               key={o.value}
               type="button"
               className={"segmented-btn" + (value === o.value ? " active" : "")}
-              disabled={disabled}
-              title={o.hint[kind]}
+              disabled={disabled || out?.mode === "blocked"}
+              title={tierTitle(o.std, out, source, o.value, kind)}
               aria-pressed={value === o.value}
               onClick={() => onChange(o.value)}
             >
               <span className="segmented-main">{o.label}</span>
-              {out && <span className="segmented-sub">{out}</span>}
+              {out && <span className="segmented-sub">{out.w}×{out.h}</span>}
+              {out && out.mode !== "down" && (
+                <span className={`segmented-tag segmented-tag--${out.mode}`}>{TIER_TAG[out.mode]}</span>
+              )}
             </button>
           );
         })}
@@ -307,6 +344,13 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
 
   const initial = userEmail.trim().charAt(0) || "?";
 
+  // Màn chiều cao lẻ (768, 900, 1200, 1600…) không có mức nào là Native — nói thẳng ra, kẻo
+  // người dùng đi tìm một nút "đúng màn hình" không tồn tại.
+  const oddScreen =
+    captureSizes && ![720, 1080, 1440, 2160].includes(captureSizes[1])
+      ? `${captureSizes[0]}×${captureSizes[1]}`
+      : null;
+
   return (
     <main className="container settings-page">
       <div className="settings-shell">
@@ -352,8 +396,9 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
             <div className="settings-card-heading">
               <h3 className="settings-card-title">Chất lượng ảnh & video</h3>
               <p className="settings-card-desc">
-                Giới hạn độ phân giải theo chiều cao. Ảnh hoặc màn hình nhỏ hơn mức chọn thì
-                giữ nguyên, không bị phóng to. Mức càng thấp thì file càng nhẹ và gửi càng nhanh.
+                Độ phân giải của file: 720p = 1280×720 · Full HD = 1920×1080 · 2K = 2560×1440 ·
+                4K = 3840×2160. Thấp hơn màn hình thì thu nhỏ cho file nhẹ; cao hơn màn hình là
+                Upscale — đủ số pixel nhưng chỉ là phóng to, không nét hơn.
               </p>
             </div>
           </div>
@@ -377,11 +422,12 @@ export function SettingsScreen({ capture, record, region, pause, regionRecord, o
           </div>
           <div className="settings-card-footer">
             <span className="settings-hint">
-              Số dưới mỗi mức là kích thước thật sẽ nhận được. Nhiều mức ra cùng một số nghĩa là
-              màn hình của bạn thấp hơn tất cả các mức đó — chọn mức cao hơn KHÔNG thêm được pixel
-              nào, vì ảnh không bao giờ bị phóng to. Cùng cỡ thì chỉ còn khác cách nén: ảnh chụp từ
-              mức 2K trở lên không nén mất dữ liệu, video ở mức cao hơn nén nhẹ hơn.
-              Mức mới áp dụng cho lần chụp / quay tiếp theo; phiên quay đang chạy vẫn giữ mức cũ.
+              Số dưới mỗi mức là kích thước thật của file — ảnh tính theo màn hình chính, video theo
+              cả vùng màn hình (nhiều màn hình thì tính cả hộp bao). <b>Native</b> = đúng độ phân giải
+              màn hình. <b>Upscale</b> = phóng to từ màn hình thấp hơn: không thêm chi tiết, file nặng
+              hơn nhiều (video 4K từ màn 1080p nặng ~3 lần Full HD).
+              {oddScreen && ` Màn hình chính ${oddScreen} không trùng mức nào nên không có lựa chọn Native.`}
+              {" "}Mức mới áp dụng cho lần chụp / quay tiếp theo; phiên quay đang chạy vẫn giữ mức cũ.
             </span>
           </div>
         </section>

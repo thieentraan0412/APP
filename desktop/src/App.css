@@ -491,6 +491,8 @@ kbd {
   display: flex;
   flex-direction: column;
   align-items: center;
+  /* Căn giữa theo chiều dọc: nút có thêm dòng Native/Upscale cao hơn, nút cạnh bên không dạt lên trên */
+  justify-content: center;
   gap: 1px;
   min-width: 88px;
   padding: 0.35rem 0.7rem;
@@ -525,6 +527,18 @@ kbd {
   opacity: 0.6;
   cursor: default;
 }
+/* Nhãn độ phân giải thật so với màn hình: Native / Upscale / Không hỗ trợ */
+.segmented-tag {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+.segmented-tag--native { color: #047857; }
+.segmented-tag--up { color: #b45309; }
+.segmented-tag--blocked { color: #b91c1c; }
+.segmented-btn.active .segmented-tag { color: #fff; opacity: 0.9; }
 
 /* Hàng hành động: có gạch phân cách phía trên (dùng cho card phím tắt) */
 .settings-card-footer {

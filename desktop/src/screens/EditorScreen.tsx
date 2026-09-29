@@ -39,9 +39,11 @@ interface Props {
   onSaved: (flattened: Blob, original: Blob, annotations: Annotations, title: string) => void;
   /** Mức chất lượng ảnh đang chọn (chiều cao tối đa) — quyết định mức nén khi xuất. */
   imageQuality: number;
+  /** Chiều cao màn hình chính; mức ≥ màn hình (Native/Upscale) thì lưu lossless — webpQuality. */
+  screenHeight?: number | null;
 }
 
-export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, onBack, onSaved, imageQuality }: Props) {
+export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, onBack, onSaved, imageQuality, screenHeight = null }: Props) {
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [boxes, setBoxes] = useState<Box[]>([]);
@@ -619,7 +621,7 @@ export function EditorScreen({ imageDataUrl, initialAnnotations, initialTitle, o
     await new Promise((r) => requestAnimationFrame(() => r(null)));
 
     const pixelRatio = 1 / fit.scale; // xuất đúng độ phân giải gốc
-    const blob = flattenStage(stageRef.current, pixelRatio, webpQuality(imageQuality));
+    const blob = flattenStage(stageRef.current, pixelRatio, webpQuality(imageQuality, screenHeight));
 
     // Quy đổi toạ độ về kích thước ảnh gốc
     const s = fit.scale;

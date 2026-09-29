@@ -22,25 +22,36 @@ struct ShortcutCfg {
     recreg:  Mutex<Option<Shortcut>>,
 }
 
-// Chất lượng (chiều CAO tối đa, px) của ảnh chụp và video quay. Chỉ THU NHỎ khi ảnh/màn
-// hình lớn hơn mức chọn — không bao giờ phóng to, vì phóng to chỉ làm file nặng thêm chứ
-// không thêm chi tiết. Hai giá trị tách riêng: ảnh thường cần nét hơn video.
+// Chất lượng ảnh chụp và video quay = CHIỀU CAO ĐÍCH của file: 720 / 1080 / 1440 / 2160, tức
+// 720p · Full HD · 2K/QHD · 4K/UHD. Thấp hơn màn hình → thu nhỏ; cao hơn màn hình → UPSCALE
+// thật (scale_to_tier ở capture.rs, spawn_segment ở record.rs). Hai giá trị tách riêng: ảnh
+// thường cần nét hơn video.
 #[derive(Default)]
 struct QualityCfg {
     image: Mutex<u32>,
     video: Mutex<u32>,
 }
 
-// Mặc định: ẢNH 2K, VIDEO Full HD. Chỉ áp cho máy chưa từng chọn mức nào (chưa có quality.cfg);
-// đã chọn trong Cài đặt thì file đó luôn thắng.
-//
-// Ảnh 2K: màn 1080p/1440p giữ nguyên từng pixel và vẫn lưu lossless (từ mức 2K trở lên, xem
-// webpQuality ở lib/flatten.ts). Chỉ màn 4K là bị thu còn 1440p — ai cần giữ hết thì chọn 4K.
-pub const DEFAULT_IMAGE_QUALITY: u32 = 1440;
-// Video Full HD: nén crf 24 thay vì 20 của mức 2K (crf_for ở record.rs) nên file nhẹ hơn ~1,6
-// lần, gửi đi nhanh hơn; màn lớn hơn 1080p thì video bị thu về 1080p.
-pub const DEFAULT_VIDEO_QUALITY: u32 = 1080;
 const QUALITY_CHOICES: [u32; 4] = [720, 1080, 1440, 2160];
+// Dòng thứ ba của quality.cfg: file ghi theo nghĩa MỚI (mức = độ phân giải đích). File không
+// có dấu này là của bản cũ, khi mức chỉ là TRẦN chiều cao — xem load_saved_quality.
+const QUALITY_FORMAT: &str = "v2";
+
+// Mức native: mức cao nhất KHÔNG vượt màn hình, nên không bao giờ tự upscale. Màn 16:9 chuẩn
+// (720/1080/1440/2160) thì đây đúng là độ phân giải màn hình; màn chiều cao lẻ (768, 900,
+// 1200, 1600) không có mức nào trùng, đành lấy mức thấp hơn gần nhất.
+pub fn native_tier(src_h: u32) -> u32 {
+    QUALITY_CHOICES.iter().rev().copied().find(|&t| t <= src_h).unwrap_or(QUALITY_CHOICES[0])
+}
+
+// Mặc định = native: ảnh theo màn hình chính, video theo hộp bao mọi màn hình. KHÔNG thể là
+// một mức cố định như trước (2K): với nghĩa mới, 2K trên màn 1080p là upscale — file nặng gần
+// gấp đôi mà không nét hơn chút nào.
+fn native_defaults() -> (u32, u32) {
+    let image_h = crate::capture::primary_size().map_or(1080, |(_, h)| h);
+    let video_h = crate::capture::virtual_desktop_size().map_or(image_h, |(_, h)| h);
+    (native_tier(image_h), native_tier(video_h))
+}
 
 fn quality_file(app: &AppHandle) -> Option<std::path::PathBuf> {
     app.path().app_config_dir().ok().map(|d| d.join("quality.cfg"))
@@ -56,15 +67,24 @@ fn parse_quality(s: Option<&str>, default: u32) -> u32 {
 }
 
 fn load_saved_quality(app: &AppHandle) -> (u32, u32) {
-    let content = match quality_file(app) {
-        Some(p) => std::fs::read_to_string(p).unwrap_or_default(),
-        None => String::new(),
+    let (native_image, native_video) = native_defaults();
+    // Chưa từng chọn → theo màn hình, và KHÔNG ghi file: đổi sang màn khác thì mặc định tự theo.
+    let Some(content) = quality_file(app).and_then(|p| std::fs::read_to_string(p).ok()) else {
+        return (native_image, native_video);
     };
     let lines: Vec<&str> = content.lines().collect();
-    (
-        parse_quality(lines.first().copied(), DEFAULT_IMAGE_QUALITY),
-        parse_quality(lines.get(1).copied(), DEFAULT_VIDEO_QUALITY),
-    )
+    let image = parse_quality(lines.first().copied(), native_image);
+    let video = parse_quality(lines.get(1).copied(), native_video);
+    if lines.get(2).map(|l| l.trim()) == Some(QUALITY_FORMAT) {
+        return (image, video);
+    }
+    // File của bản cũ: khi ấy chọn "4K" trên màn 1080p nghĩa là "đừng thu nhỏ", giờ lại nghĩa
+    // là upscale. Hạ mọi mức cao hơn màn hình về native để đầu ra giữ y như trước thay vì bỗng
+    // nặng gấp 4 lần; mức thấp hơn màn hình (chủ động chọn cho nhẹ) giữ nguyên. Chạy một lần.
+    let image = image.min(native_image);
+    let video = video.min(native_video);
+    save_quality_file(app, image, video);
+    (image, video)
 }
 
 fn save_quality_file(app: &AppHandle, image: u32, video: u32) {
@@ -72,7 +92,7 @@ fn save_quality_file(app: &AppHandle, image: u32, video: u32) {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, format!("{image}\n{video}\n"));
+        let _ = std::fs::write(p, format!("{image}\n{video}\n{QUALITY_FORMAT}\n"));
     }
 }
 
@@ -227,8 +247,9 @@ fn get_quality(app: AppHandle) -> (u32, u32) {
 
 #[tauri::command]
 fn set_quality(app: AppHandle, image: u32, video: u32) {
-    let image = parse_quality(Some(&image.to_string()), DEFAULT_IMAGE_QUALITY);
-    let video = parse_quality(Some(&video.to_string()), DEFAULT_VIDEO_QUALITY);
+    let (native_image, native_video) = native_defaults();
+    let image = parse_quality(Some(&image.to_string()), native_image);
+    let video = parse_quality(Some(&video.to_string()), native_video);
     let st = app.state::<QualityCfg>();
     *st.image.lock().unwrap() = image;
     *st.video.lock().unwrap() = video;
@@ -428,4 +449,20 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::native_tier;
+
+    #[test]
+    fn muc_native_khong_bao_gio_vuot_man_hinh() {
+        assert_eq!(native_tier(1080), 1080);
+        assert_eq!(native_tier(1440), 1440);
+        assert_eq!(native_tier(2160), 2160);
+        assert_eq!(native_tier(768), 720);
+        assert_eq!(native_tier(1200), 1080);
+        assert_eq!(native_tier(4320), 2160);
+        assert_eq!(native_tier(600), 720); // thấp hơn mọi mức: lấy mức nhỏ nhất
+    }
 }
