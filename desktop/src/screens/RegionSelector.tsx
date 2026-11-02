@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, primaryMonitor } from "@tauri-apps/api/window";
 
 // Lớp phủ chọn vùng, dùng chung cho HAI việc:
 // - "capture": kéo xong là cắt ảnh ngay (hành vi cũ).
 // - "record":  kéo xong hiện thanh xác nhận → đếm ngược → Rust ẩn lớp phủ rồi quay video.
 // Chế độ do Rust quyết định (RegionState.record); overlay hỏi lại mỗi lần được mở.
+// Rust trải overlay phủ hộp bao MỌI màn hình, nên kéo chọn được qua lại giữa các màn.
 
 type Rect = { x: number; y: number; w: number; h: number };
 type Mode = "capture" | "record";
@@ -22,6 +23,17 @@ function evenDown(v: number): number {
   return Math.max(0, Math.floor(v / 2) * 2);
 }
 
+// Gửi theo TỈ LỆ so với overlay (không phải pixel): không phụ thuộc mức phóng to (DPI) của
+// Windows, kể cả khi hai màn hình khác mức scale.
+function toFractions(r: Rect) {
+  return {
+    fx: r.x / window.innerWidth,
+    fy: r.y / window.innerHeight,
+    fw: r.w / window.innerWidth,
+    fh: r.h / window.innerHeight,
+  };
+}
+
 export function RegionSelector() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drag = useRef<{ x0: number; y0: number } | null>(null);
@@ -31,6 +43,7 @@ export function RegionSelector() {
   // Vùng đã chốt, đang chờ xác nhận (chỉ dùng ở chế độ quay).
   const [rect, setRect] = useState<Rect | null>(null);
   const [count, setCount] = useState<number | null>(null);
+  const [hintPos, setHintPos] = useState({ left: "50%", top: "24px" });
 
   // Gắn MỘT LẦN: cửa sổ overlay được dùng lại (ẩn/hiện) chứ không tạo mới, nên canvas
   // vẫn giữ vùng kéo của lần trước — mỗi lần overlay được focus lại phải xoá sạch.
@@ -40,8 +53,12 @@ export function RegionSelector() {
     const unlistenP = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       if (focused) resetAll();
     });
+    // Rust đặt lại kích thước overlay ngay trước khi hiện, webview có thể báo kích thước mới
+    // SAU khi đã focus → canvas phải theo kịp, nếu không chỉ tô được một phần overlay.
+    window.addEventListener("resize", resetAll);
     return () => {
       unlistenP.then((un) => un());
+      window.removeEventListener("resize", resetAll);
     };
   }, []);
 
@@ -70,15 +87,8 @@ export function RegionSelector() {
     }
     if (fired.current || !rect) return;
     fired.current = true;
-    // Gửi theo TỈ LỆ so với màn hình chứa overlay (không phải pixel): Rust quy đổi tiếp
-    // sang tỉ lệ trên toàn bộ virtual desktop, và ffmpeg cắt theo tỉ lệ đó. Nhờ vậy
-    // không phụ thuộc mức phóng to (DPI) của Windows.
-    invoke("confirm_region_record", {
-      fx: rect.x / window.innerWidth,
-      fy: rect.y / window.innerHeight,
-      fw: rect.w / window.innerWidth,
-      fh: rect.h / window.innerHeight,
-    }).catch(() => {});
+    // Overlay phủ đúng toàn bộ virtual desktop, và ffmpeg cắt theo tỉ lệ trên chính hộp đó.
+    invoke("confirm_region_record", toFractions(rect)).catch(() => {});
   }, [count, rect]);
 
   function resetAll() {
@@ -93,6 +103,20 @@ export function RegionSelector() {
     drawDim(); // canvas trống → không còn viền/nhãn cũ
     invoke<string>("region_mode")
       .then((m) => setMode(m === "record" ? "record" : "capture"))
+      .catch(() => {});
+    placeHint();
+  }
+
+  // Giữa overlay có thể rơi đúng khe giữa hai màn hình → đặt gợi ý giữa màn hình chính.
+  function placeHint() {
+    const win = getCurrentWindow();
+    Promise.all([primaryMonitor(), win.outerPosition(), win.outerSize()])
+      .then(([m, pos, size]) => {
+        if (!m || size.width === 0 || size.height === 0) return;
+        const x = (m.position.x + m.size.width / 2 - pos.x) / size.width;
+        const y = (m.position.y - pos.y) / size.height;
+        setHintPos({ left: `${x * 100}%`, top: `calc(${y * 100}% + 24px)` });
+      })
       .catch(() => {});
   }
 
@@ -206,17 +230,12 @@ export function RegionSelector() {
       return;
     }
 
-    const x = Math.round(cssRect.x * dpr);
-    const y = Math.round(cssRect.y * dpr);
-    const w = Math.round(cssRect.w * dpr);
-    const h = Math.round(cssRect.h * dpr);
-
-    if (w < MIN_CAPTURE_PX || h < MIN_CAPTURE_PX) {
+    if (cssRect.w * dpr < MIN_CAPTURE_PX || cssRect.h * dpr < MIN_CAPTURE_PX) {
       await invoke("cancel_region_capture").catch(() => {});
       return;
     }
     // Lỗi crop được Rust báo về main qua "capture-error" (H3) → chỉ cần nuốt rejection ở đây.
-    await invoke("confirm_region_capture", { x, y, w, h }).catch(() => {});
+    await invoke("confirm_region_capture", toFractions(cssRect)).catch(() => {});
   }
 
   // Thanh xác nhận đặt NGOÀI vùng chọn (dưới, hoặc trên nếu hết chỗ) để không che nội dung.
@@ -249,7 +268,7 @@ export function RegionSelector() {
       />
 
       {mode === "record" && rect === null && count === null && (
-        <div style={hintStyle}>Kéo chuột để chọn vùng quay · <b>Esc</b> để huỷ</div>
+        <div style={{ ...hintStyle, ...hintPos }}>Kéo chuột để chọn vùng quay · <b>Esc</b> để huỷ</div>
       )}
 
       {showBar && rect && (
@@ -296,8 +315,6 @@ const btnStyle: React.CSSProperties = {
 
 const hintStyle: React.CSSProperties = {
   position: "fixed",
-  top: 24,
-  left: "50%",
   transform: "translateX(-50%)",
   padding: "8px 16px",
   borderRadius: 999,

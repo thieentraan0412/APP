@@ -35,7 +35,7 @@ Ký hiệu: ✓ = tôi đã xác minh trực tiếp trên code · ⚠ = liên qu
 - Khi overlay chọn vùng QR đang mở, phím tắt Chụp vẫn chạy → emit `image-captured` (full screen) bị `decodeQr` tiêu thụ + reset `qrModeRef=false`. Sau đó người dùng kéo xong vùng → ảnh vùng lại mở trong editor thay vì dò QR. Hai hành động đổi chỗ kết quả.
 - **Fix:** chặn/hoãn `trigger_capture` khi đang chụp vùng, hoặc cho QR dùng event riêng thay vì chung `image-captured`.
 
-#### H3 — Chụp vùng & quét QR chỉ dùng MÀN HÌNH CHÍNH (đa màn hình sai)
+#### H3 ✓ — Chụp vùng & quét QR chỉ dùng MÀN HÌNH CHÍNH (đa màn hình sai)
 - **File:** [capture.rs:27-39](desktop/src-tauri/src/capture.rs#L27-L39) (`capture_primary_raw` luôn lấy `is_primary()`), [tauri.conf.json:34-45](desktop/src-tauri/tauri.conf.json#L34-L45) (overlay `region_selector` không đặt lại vị trí), [RegionSelector.tsx](desktop/src/screens/RegionSelector.tsx)
 - Overlay chọn vùng full-screen nhưng không được dời sang màn hình đang thao tác; luôn crop từ buffer màn hình chính. Trên máy 2 màn hình → crop sai/rác. Nếu toạ độ vượt kích thước màn chính → `cw==0/ch==0` → `Err("Vùng chọn quá nhỏ")`, mà `onMouseUp` không `.catch` → overlay đóng im lặng, không báo lỗi.
 - **Fix:** chụp đúng màn hình chứa overlay (hoặc chụp toàn virtual desktop + offset theo gốc màn hình); đặt vị trí/kích thước overlay theo màn hình đích trước khi hiện; thêm xử lý lỗi cho `onMouseUp`.

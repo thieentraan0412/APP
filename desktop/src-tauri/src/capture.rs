@@ -6,7 +6,7 @@ use image::{
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewWindow};
 use xcap::Monitor;
 
 pub struct RegionState {
@@ -59,6 +59,108 @@ fn capture_primary_raw() -> Result<(Vec<u8>, u32, u32), String> {
     let (w, h) = (img.width(), img.height());
     let raw = img.into_raw(); // RGBA8
     Ok((raw, w, h))
+}
+
+// Hộp bao mọi màn hình theo pixel vật lý. Gốc toạ độ là màn hình chính nên left/top âm khi có
+// màn nằm bên trái hoặc phía trên nó.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Bounds {
+    left: i32,
+    top: i32,
+    w: u32,
+    h: u32,
+}
+
+fn bounding_box(rects: impl Iterator<Item = (i32, i32, u32, u32)>) -> Option<Bounds> {
+    let (mut left, mut top, mut right, mut bottom) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (x, y, w, h) in rects {
+        left = left.min(x);
+        top = top.min(y);
+        right = right.max(x + w as i32);
+        bottom = bottom.max(y + h as i32);
+    }
+    (right > left && bottom > top).then(|| Bounds {
+        left,
+        top,
+        w: (right - left) as u32,
+        h: (bottom - top) as u32,
+    })
+}
+
+fn monitor_rect(m: &Monitor) -> Option<(i32, i32, u32, u32)> {
+    Some((m.x().ok()?, m.y().ok()?, m.width().ok()?, m.height().ok()?))
+}
+
+fn monitors_bounds(monitors: &[Monitor]) -> Option<Bounds> {
+    bounding_box(monitors.iter().filter_map(monitor_rect))
+}
+
+fn desktop_bounds() -> Result<Bounds, String> {
+    let monitors = Monitor::all().map_err(|e| e.to_string())?;
+    monitors_bounds(&monitors).ok_or("Không tìm thấy màn hình nào".into())
+}
+
+// Dán ảnh nguồn vào ảnh đích tại (ox, oy), phần tràn ra ngoài thì bỏ. Dùng kích thước thật của
+// ảnh chụp chứ không tin số màn hình báo: lệch nhau thì thiếu vài px còn hơn panic.
+fn blit(dst: &mut [u8], dst_w: u32, dst_h: u32, src: &[u8], src_w: u32, src_h: u32, ox: u32, oy: u32) {
+    let row_len = src_w.min(dst_w.saturating_sub(ox)) as usize * 4;
+    let rows = src_h.min(dst_h.saturating_sub(oy)) as usize;
+    for row in 0..rows {
+        let d = (oy as usize + row) * dst_w as usize * 4 + ox as usize * 4;
+        let s = row * src_w as usize * 4;
+        dst[d..d + row_len].copy_from_slice(&src[s..s + row_len]);
+    }
+}
+
+// Chụp MỌI màn hình rồi ghép thành một ảnh đúng theo vị trí của chúng, để vùng chọn nằm ở màn
+// nào (hay vắt qua hai màn) cũng cắt ra được. Góc hộp bao không có màn nào (hai màn lệch cao
+// thấp) để đen đục. Một màn chụp lỗi thì màn đó đen, vẫn cho cắt trên các màn còn lại; chỉ báo
+// lỗi khi không chụp được màn nào.
+fn capture_virtual_raw() -> Result<(Vec<u8>, Bounds), String> {
+    let monitors = Monitor::all().map_err(|e| e.to_string())?;
+    let bounds = monitors_bounds(&monitors).ok_or("Không tìm thấy màn hình nào")?;
+    let mut raw = [0u8, 0, 0, 255].repeat(bounds.w as usize * bounds.h as usize);
+
+    let mut captured = false;
+    let mut last_err = None;
+    for mon in &monitors {
+        let Some((x, y, _, _)) = monitor_rect(mon) else { continue };
+        match mon.capture_image() {
+            Ok(img) => {
+                let (ox, oy) = ((x - bounds.left) as u32, (y - bounds.top) as u32);
+                blit(&mut raw, bounds.w, bounds.h, img.as_raw(), img.width(), img.height(), ox, oy);
+                captured = true;
+            }
+            Err(e) => last_err = Some(e.to_string()),
+        }
+    }
+    if !captured {
+        return Err(last_err.unwrap_or("Không chụp được màn hình nào".into()));
+    }
+    Ok((raw, bounds))
+}
+
+// Trải overlay phủ kín hộp bao. Phải kiểm tra lại rồi đặt lần nữa: mỗi khi cửa sổ sang vùng có
+// DPI khác, tao tự co giãn nó theo WM_DPICHANGED nên kích thước vừa đặt có thể bị đổi. Hàm đọc
+// cũng là lệnh đồng bộ, nên chạy sau khi các lệnh đặt đã xong.
+fn cover_desktop(sel: &WebviewWindow, b: Bounds) {
+    let pos = PhysicalPosition::new(b.left, b.top);
+    let size = PhysicalSize::new(b.w, b.h);
+    for _ in 0..3 {
+        let _ = sel.set_position(pos);
+        let _ = sel.set_size(size);
+        if sel.outer_position().ok() == Some(pos) && sel.outer_size().ok() == Some(size) {
+            break;
+        }
+    }
+}
+
+// Đổi vùng chọn theo tỉ lệ (0..1) của overlay → pixel trên ảnh ghép, chặn trong khung ảnh.
+fn frac_to_px(fx: f64, fy: f64, fw: f64, fh: f64, full_w: u32, full_h: u32) -> (u32, u32, u32, u32) {
+    let px = |f: f64, full: u32| (f * full as f64).round().clamp(0.0, full as f64) as u32;
+    let (x, y) = (px(fx, full_w), px(fy, full_h));
+    let (x2, y2) = (px(fx + fw, full_w), px(fy + fh, full_h));
+    (x, y, x2.saturating_sub(x), y2.saturating_sub(y))
 }
 
 fn rgba_to_data_url(raw: &[u8], w: u32, h: u32) -> Result<String, String> {
@@ -151,27 +253,8 @@ pub fn capture_sizes() -> Result<(u32, u32, u32, u32), String> {
     let pw = m.width().map_err(|e| e.to_string())?;
     let ph = m.height().map_err(|e| e.to_string())?;
 
-    let (mut left, mut top, mut right, mut bottom) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    for mon in &monitors {
-        let (x, y) = match (mon.x(), mon.y()) {
-            (Ok(x), Ok(y)) => (x, y),
-            _ => continue,
-        };
-        let (w, h) = match (mon.width(), mon.height()) {
-            (Ok(w), Ok(h)) => (w as i32, h as i32),
-            _ => continue,
-        };
-        left = left.min(x);
-        top = top.min(y);
-        right = right.max(x + w);
-        bottom = bottom.max(y + h);
-    }
     // Không đọc được màn nào → lấy tạm màn chính, hơn là trả số âm vô nghĩa.
-    let (vw, vh) = if right > left && bottom > top {
-        ((right - left) as u32, (bottom - top) as u32)
-    } else {
-        (pw, ph)
-    };
+    let (vw, vh) = monitors_bounds(&monitors).map_or((pw, ph), |b| (b.w, b.h));
     Ok((pw, ph, vw, vh))
 }
 
@@ -194,6 +277,7 @@ pub fn capture_screen(app: AppHandle) -> Result<String, String> {
 // `record = false` (chụp ảnh): chụp full trước rồi mới mở overlay, vì ảnh kết quả được
 // cắt ra từ ảnh chụp này. `record = true` (quay video): KHÔNG cần chụp — overlay trong
 // suốt làm tối trực tiếp trên màn hình thật, và video do ffmpeg thu sau đó.
+// Cả hai chế độ overlay đều trải qua mọi màn hình để kéo chọn được ở màn nào cũng vậy.
 pub fn begin_region_selection(app: AppHandle, record: bool) {
     // Overlay đã mở rồi → bỏ qua, tránh đè hai phiên chọn vùng lên nhau.
     if region_active(&app) {
@@ -213,27 +297,32 @@ pub fn begin_region_selection(app: AppHandle, record: bool) {
         }
         std::thread::sleep(std::time::Duration::from_millis(150));
 
-        if !record {
-            match capture_primary_raw() {
-                Ok((raw, w, h)) => {
-                    *state.raw.lock().unwrap() = Some(raw);
-                    *state.w.lock().unwrap() = w;
-                    *state.h.lock().unwrap() = h;
+        let bounds = if record {
+            desktop_bounds()
+        } else {
+            capture_virtual_raw().map(|(raw, b)| {
+                *state.raw.lock().unwrap() = Some(raw);
+                *state.w.lock().unwrap() = b.w;
+                *state.h.lock().unwrap() = b.h;
+                b
+            })
+        };
+        let bounds = match bounds {
+            Ok(b) => b,
+            Err(e) => {
+                // Lỗi → overlay không mở → hết trạng thái chọn vùng.
+                state.active.store(false, Ordering::SeqCst);
+                state.record.store(false, Ordering::SeqCst);
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.show();
                 }
-                Err(e) => {
-                    // Chụp lỗi → overlay không mở → hết trạng thái chọn vùng.
-                    state.active.store(false, Ordering::SeqCst);
-                    state.record.store(false, Ordering::SeqCst);
-                    if let Some(main) = app.get_webview_window("main") {
-                        let _ = main.show();
-                    }
-                    let _ = app.emit("capture-error", e);
-                    return;
-                }
+                let _ = app.emit(if record { "video-error" } else { "capture-error" }, e);
+                return;
             }
-        }
+        };
 
         if let Some(sel) = app.get_webview_window("region_selector") {
+            cover_desktop(&sel, bounds);
             let _ = sel.show();
             let _ = sel.set_focus();
         }
@@ -264,15 +353,16 @@ pub fn region_mode(state: tauri::State<'_, RegionState>) -> String {
     }
 }
 
-// Nhận tọa độ physical px (đã nhân DPI ở frontend), crop ảnh, gửi về main.
+// Nhận vùng chọn theo TỈ LỆ (0..1) của overlay, crop ảnh, gửi về main. Không nhận pixel vì hai
+// màn có thể khác mức scale; overlay phủ đúng hộp bao nên tỉ lệ khớp thẳng với ảnh ghép.
 #[tauri::command]
 pub fn confirm_region_capture(
     app: AppHandle,
     state: tauri::State<'_, RegionState>,
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
+    fx: f64,
+    fy: f64,
+    fw: f64,
+    fh: f64,
 ) -> Result<(), String> {
     state.active.store(false, Ordering::SeqCst); // hết chụp vùng (H2)
     if let Some(sel) = app.get_webview_window("region_selector") {
@@ -289,25 +379,23 @@ pub fn confirm_region_capture(
         let full_w = *state.w.lock().unwrap();
         let full_h = *state.h.lock().unwrap();
 
-        // Clamp tránh out-of-bounds
-        let x2 = (x + w).min(full_w);
-        let y2 = (y + h).min(full_h);
-        let cw = x2.saturating_sub(x);
-        let ch = y2.saturating_sub(y);
+        let (x, y, cw, ch) = frac_to_px(fx, fy, fw, fh, full_w, full_h);
         if cw == 0 || ch == 0 {
             return Err("Vùng chọn quá nhỏ".into());
         }
 
         let stride = full_w as usize * 4;
         let mut cropped = Vec::with_capacity(cw as usize * ch as usize * 4);
-        for row in y..y2 {
+        for row in y..y + ch {
             let start = row as usize * stride + x as usize * 4;
             cropped.extend_from_slice(&raw[start..start + cw as usize * 4]);
         }
 
-        // Upscale tính theo tỉ lệ của CẢ màn hình (full_h), không theo vùng: mức 4K trên màn
-        // 1080p thì vùng nào cũng to gấp đôi, khớp với con số Cài đặt hiện cho ảnh toàn màn hình.
-        let (cropped, cw, ch) = scale_to_tier(cropped, cw, ch, crate::image_quality(&app), full_h);
+        // Upscale tính theo tỉ lệ của CẢ màn hình chính, không theo vùng hay ảnh ghép: mức 4K
+        // trên màn 1080p thì vùng nào cũng to gấp đôi, khớp với con số Cài đặt hiện cho ảnh
+        // toàn màn hình.
+        let src_h = primary_size().map_or(full_h, |(_, h)| h);
+        let (cropped, cw, ch) = scale_to_tier(cropped, cw, ch, crate::image_quality(&app), src_h);
         copy_rgba_to_clipboard(cropped.clone(), cw, ch);
         rgba_to_data_url(&cropped, cw, ch)
     })();
@@ -337,7 +425,7 @@ pub fn cancel_region_capture(app: AppHandle) {
 }
 
 // Người dùng chốt vùng và đã đếm ngược xong → bắt đầu quay.
-// fx/fy/fw/fh là tỉ lệ (0..1) so với MÀN HÌNH chứa overlay.
+// fx/fy/fw/fh là tỉ lệ (0..1) so với overlay, tức cả virtual desktop.
 #[tauri::command]
 pub fn confirm_region_record(
     app: AppHandle,
@@ -346,7 +434,7 @@ pub fn confirm_region_record(
     fw: f64,
     fh: f64,
 ) -> Result<(), String> {
-    let crop = match to_virtual_crop(&app, fx, fy, fw, fh) {
+    let crop = match to_virtual_crop(fx, fy, fw, fh) {
         Ok(c) => c,
         Err(e) => {
             cancel_region_capture(app.clone());
@@ -376,57 +464,89 @@ pub fn confirm_region_record(
     Ok(())
 }
 
-// Đổi tỉ lệ theo màn hình chứa overlay → tỉ lệ theo TOÀN BỘ virtual desktop, vì gdigrab
-// với input "desktop" thu cả vùng bao của mọi màn hình chứ không riêng màn hình chính.
-fn to_virtual_crop(
-    app: &AppHandle,
-    fx: f64,
-    fy: f64,
-    fw: f64,
-    fh: f64,
-) -> Result<crate::record::Crop, String> {
-    let sel = app
-        .get_webview_window("region_selector")
-        .ok_or("Không tìm thấy lớp chọn vùng")?;
-    let mon = sel
-        .current_monitor()
-        .map_err(|e| e.to_string())?
-        .or(sel.primary_monitor().map_err(|e| e.to_string())?)
-        .ok_or("Không tìm thấy màn hình nào")?;
-    let (mp, ms) = (mon.position(), mon.size());
-
-    // Hộp bao mọi màn hình, theo pixel vật lý.
-    let mut left = mp.x;
-    let mut top = mp.y;
-    let mut right = mp.x + ms.width as i32;
-    let mut bottom = mp.y + ms.height as i32;
-    for m in sel.available_monitors().map_err(|e| e.to_string())? {
-        let (p, s) = (m.position(), m.size());
-        left = left.min(p.x);
-        top = top.min(p.y);
-        right = right.max(p.x + s.width as i32);
-        bottom = bottom.max(p.y + s.height as i32);
-    }
-    let vw = (right - left) as f64;
-    let vh = (bottom - top) as f64;
-    if vw <= 0.0 || vh <= 0.0 {
-        return Err("Không đọc được kích thước màn hình".into());
-    }
-
-    let x = (mp.x - left) as f64 + fx * ms.width as f64;
-    let y = (mp.y - top) as f64 + fy * ms.height as f64;
+// Overlay phủ đúng hộp bao mọi màn hình, và gdigrab với input "desktop" cũng thu đúng hộp đó,
+// nên tỉ lệ dùng thẳng được. Chỉ cần tính thêm toạ độ thật để đặt khung viền.
+fn to_virtual_crop(fx: f64, fy: f64, fw: f64, fh: f64) -> Result<crate::record::Crop, String> {
+    let b = desktop_bounds()?;
+    let (vw, vh) = (b.w as f64, b.h as f64);
     Ok(crate::record::Crop {
-        fx: (x / vw).clamp(0.0, 1.0),
-        fy: (y / vh).clamp(0.0, 1.0),
-        fw: (fw * ms.width as f64 / vw).clamp(0.0, 1.0),
-        fh: (fh * ms.height as f64 / vh).clamp(0.0, 1.0),
-        // Toạ độ đặt cửa sổ dùng gốc màn hình chính (mp.x/mp.y đã theo gốc đó), khác với
-        // gốc của hộp bao ở trên — nên tính riêng chứ không tái dùng x/y.
-        sx: mp.x + (fx * ms.width as f64).round() as i32,
-        sy: mp.y + (fy * ms.height as f64).round() as i32,
-        sw: (fw * ms.width as f64).round().max(1.0) as u32,
-        sh: (fh * ms.height as f64).round().max(1.0) as u32,
+        fx: fx.clamp(0.0, 1.0),
+        fy: fy.clamp(0.0, 1.0),
+        fw: fw.clamp(0.0, 1.0),
+        fh: fh.clamp(0.0, 1.0),
+        sx: b.left + (fx * vw).round() as i32,
+        sy: b.top + (fy * vh).round() as i32,
+        sw: (fw * vw).round().max(1.0) as u32,
+        sh: (fh * vh).round().max(1.0) as u32,
     })
+}
+
+#[cfg(test)]
+mod multi_monitor_tests {
+    use super::{bounding_box, blit, frac_to_px, Bounds};
+
+    #[test]
+    fn hop_bao_khi_man_phu_nam_ben_trai() {
+        let rects = [(0, 0, 1920, 1080), (-1920, 0, 1920, 1080)];
+        assert_eq!(
+            bounding_box(rects.into_iter()),
+            Some(Bounds { left: -1920, top: 0, w: 3840, h: 1080 })
+        );
+    }
+
+    #[test]
+    fn hop_bao_khi_hai_man_lech_cao_thap() {
+        let rects = [(0, 0, 1920, 1080), (1920, -200, 2560, 1440)];
+        assert_eq!(
+            bounding_box(rects.into_iter()),
+            Some(Bounds { left: 0, top: -200, w: 4480, h: 1440 })
+        );
+    }
+
+    #[test]
+    fn khong_co_man_nao() {
+        assert_eq!(bounding_box(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn dan_anh_dung_vi_tri() {
+        let mut dst = vec![0u8; 3 * 2 * 4];
+        let src = [9u8; 4];
+        blit(&mut dst, 3, 2, &src, 1, 1, 2, 1);
+        assert_eq!(&dst[20..24], &src); // hàng 1, cột 2
+        assert_eq!(dst.iter().filter(|&&v| v != 0).count(), 4);
+    }
+
+    #[test]
+    fn anh_chup_to_hon_khung_thi_cat_bot() {
+        // Ảnh 2×2 dán ở (2, 1) vào khung 3×2: chỉ còn đúng 1 pixel lọt vào, không panic.
+        let mut dst = vec![0u8; 3 * 2 * 4];
+        let src: Vec<u8> = (1..=16).collect();
+        blit(&mut dst, 3, 2, &src, 2, 2, 2, 1);
+        assert_eq!(&dst[20..24], &src[0..4]);
+        assert_eq!(dst.iter().filter(|&&v| v != 0).count(), 4);
+
+        // Điểm dán nằm hẳn ngoài khung → bỏ qua.
+        let mut dst = vec![0u8; 4];
+        blit(&mut dst, 1, 1, &src, 2, 2, 5, 5);
+        assert_eq!(dst, vec![0u8; 4]);
+    }
+
+    #[test]
+    fn vung_vat_qua_hai_man() {
+        // Ảnh ghép 3840×1080, vùng từ 1720 tới 2120 (vắt qua mép giữa hai màn).
+        let (fw, fh) = (3840.0, 1080.0);
+        assert_eq!(
+            frac_to_px(1720.0 / fw, 100.0 / fh, 400.0 / fw, 300.0 / fh, 3840, 1080),
+            (1720, 100, 400, 300)
+        );
+    }
+
+    #[test]
+    fn vung_tran_khung_bi_chan() {
+        assert_eq!(frac_to_px(0.5, 0.5, 0.9, 0.9, 100, 100), (50, 50, 50, 50));
+        assert_eq!(frac_to_px(1.0, 1.0, 0.1, 0.1, 100, 100), (100, 100, 0, 0));
+    }
 }
 
 #[cfg(test)]

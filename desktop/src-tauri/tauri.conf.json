@@ -59,7 +59,7 @@
         "transparent": true,
         "alwaysOnTop": true,
         "visible": false,
-        "fullscreen": true,
+        "shadow": false,
         "skipTaskbar": true,
         "resizable": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,AsyncDns --disable-quic --no-proxy-server --dns-over-https-mode=off"
