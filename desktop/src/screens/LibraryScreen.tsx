@@ -323,7 +323,7 @@ export function LibraryScreen(props: Props) {
           {!loading && items.length === 0 && !error && (
             <div className="lib-empty">
               <IcoCamera />
-              <p>Chưa có nội dung nào. Hãy chụp ảnh hoặc quay video.</p>
+              <p>Chưa có nội dung nào. Hãy chụp ảnh, quay video, hoặc mở ảnh / video có sẵn trên máy.</p>
             </div>
           )}
           {!loading && items.length > 0 && filtered.length === 0 && (
@@ -406,8 +406,10 @@ export function LibraryScreen(props: Props) {
                       <button className="lib-ico" onClick={() => onCopy(it.url)} title="Copy link"><IcoCopy /></button>
                       <button className="lib-ico" onClick={() => onOpen(it.url)} title="Mở link"><IcoLink /></button>
                       <button className="lib-ico" onClick={() => startEdit(it)} title="Đổi tiêu đề"><IcoTag /></button>
-                      {it.type === "image" && (
+                      {it.type === "image" ? (
                         <button className="lib-ico" onClick={() => onEdit(it)} title="Sửa annotate"><IcoEdit /></button>
+                      ) : (
+                        <button className="lib-ico" onClick={() => onEdit(it)} title="Sửa video: cắt đoạn, đổi tiêu đề — giữ nguyên link"><IcoEdit /></button>
                       )}
                       <button className="lib-ico lib-ico--danger" onClick={() => onDelete(it.id)} title="Xoá"><IcoTrash /></button>
                     </div>

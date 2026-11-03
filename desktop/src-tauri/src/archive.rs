@@ -18,6 +18,24 @@ pub async fn archive_save(url: String, dest: String) -> Result<u64, String> {
         .map_err(|e| e.to_string())?
 }
 
+// Tải một file trên cloud về THƯ MỤC TẠM (sửa lại video đã đăng) và trả về đường dẫn. Bên gọi
+// coi đó là file tạm của mình: cắt / lưu xong / huỷ đều xoá nó. Cùng cơ chế .part như trên nên
+// đứt mạng giữa chừng không để lại một video cụt trông như tải xong.
+#[tauri::command]
+pub async fn download_to_temp(url: String, ext: String) -> Result<String, String> {
+    let ext: String = ext.chars().filter(|c| c.is_ascii_alphanumeric()).take(5).collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = std::env::temp_dir().join(format!("capture_edit_{stamp}.{}", if ext.is_empty() { "bin" } else { &ext }));
+    let target = dest.clone();
+    tauri::async_runtime::spawn_blocking(move || download_to_file(&url, &target))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 fn download_to_file(url: &str, dest: &Path) -> Result<u64, String> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("Không tạo được thư mục: {e}"))?;

@@ -79,12 +79,25 @@ export interface ItemDetail {
 }
 
 // ---------- Tạo mới ----------
+
+// Cloudflare (gói Free/Pro) từ chối mọi request lớn hơn 100 MB ngay ở rìa mạng (HTTP 413), và
+// fetchRetry còn thử lại tới 4 lần — tức đẩy hàng trăm MB vô ích rồi mới báo một lỗi khó hiểu.
+// Chặn từ trước với lời giải thích; chừa ~5 MB cho phần đầu multipart.
+export const UPLOAD_MAX_BYTES = 95 * 1000 * 1000;
+
+function assertUploadSize(bytes: number, what: string, hint: string) {
+  if (bytes <= UPLOAD_MAX_BYTES) return;
+  const mb = (n: number) => Math.round(n / 1_000_000);
+  throw new Error(`${what} nặng ${Math.ceil(bytes / 1_000_000)} MB, vượt giới hạn ${mb(UPLOAD_MAX_BYTES)} MB mỗi lần tải lên (Cloudflare chỉ nhận tối đa 100 MB). ${hint}`);
+}
+
 export async function uploadImage(
   flattened: Blob,
   original: Blob,
   annotations: Annotations,
   title = ""
 ): Promise<UploadResult> {
+  assertUploadSize(flattened.size + original.size, "Ảnh", "Hãy dùng ảnh có độ phân giải nhỏ hơn.");
   const form = new FormData();
   form.append("file", flattened, "image.webp");
   form.append("original", original, "original.webp");
@@ -95,6 +108,7 @@ export async function uploadImage(
 }
 
 export async function uploadVideo(blob: Blob): Promise<UploadResult> {
+  assertUploadSize(blob.size, "Video", "Cắt bớt đoạn rồi lưu lại, hoặc dùng \"Lưu vào máy\".");
   const form = new FormData();
   form.append("file", blob, "video.mp4");
   form.append("type", "video");
@@ -197,6 +211,16 @@ export async function updateItem(
   const form = new FormData();
   form.append("file", flattened, "image.webp");
   form.append("annotations", JSON.stringify(annotations));
+  form.append("title", title);
+  return patchItem(id, form);
+}
+
+// Thay file video của một mục đã đăng (sau khi cắt lại) — giữ nguyên id nên link cũ vẫn chạy.
+// Worker ghi đè đúng key R2 cũ với mime video/mp4 và cập nhật lại dung lượng.
+export async function updateVideo(id: string, blob: Blob, title = ""): Promise<{ url: string }> {
+  assertUploadSize(blob.size, "Video", "Cắt bớt đoạn rồi lưu lại.");
+  const form = new FormData();
+  form.append("file", blob, "video.mp4");
   form.append("title", title);
   return patchItem(id, form);
 }

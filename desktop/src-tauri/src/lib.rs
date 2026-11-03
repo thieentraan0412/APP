@@ -287,6 +287,15 @@ fn save_image_to_path(data_url: String, dst: String) -> Result<(), String> {
     })
 }
 
+// Nhập ảnh / video người dùng chọn từ máy — trả về BẢN SAO trong thư mục tạm (xem ffmpeg.rs).
+// spawn_blocking vì chuyển định dạng video có thể mất cả phút.
+#[tauri::command]
+async fn import_media(app: AppHandle, src: String) -> Result<ffmpeg::Imported, String> {
+    tauri::async_runtime::spawn_blocking(move || ffmpeg::import_media(&app, &src))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // Cắt video (async + spawn_blocking để không treo UI khi ffmpeg chạy).
 #[tauri::command]
 async fn trim_video(app: AppHandle, src: String, start: f64, end: f64) -> Result<String, String> {
@@ -437,8 +446,10 @@ pub fn run() {
             save_video_to_path,
             save_image_to_path,
             trim_video,
+            import_media,
             toggle_recording_cmd,
             archive::archive_save,
+            archive::download_to_temp,
             archive::archive_write_text,
             archive::archive_read_text,
             archive::archive_read_file,

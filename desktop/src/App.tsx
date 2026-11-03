@@ -17,6 +17,7 @@ import { fetchMe, logout, getStoredUser, type AuthUser } from "./lib/auth";
 import {
   uploadImage,
   uploadVideo,
+  updateVideo,
   listItems,
   deleteItem,
   getItem,
@@ -58,7 +59,7 @@ import {
 import type { Annotations } from "./types";
 import { checkForUpdate, applyUpdate, type Update } from "./lib/updater";
 import { getVersion } from "@tauri-apps/api/app";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { save as saveDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ImagePreview } from "./components/ImagePreview";
 import "./App.css";
 
@@ -90,9 +91,43 @@ function checkUsageWarnings(stats: UsageStats): string[] {
   return warns;
 }
 
-function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, onRecord, onRegionRecord, onData, onUsage, onSettings, recording, usageWarnings }: {
+// Định dạng mở được từ máy — khớp IMAGE_EXT / VIDEO_EXT trong src-tauri/src/ffmpeg.rs.
+const IMPORT_IMAGE_EXT = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+const IMPORT_VIDEO_EXT = ["mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv"];
+const IMAGE_MIME: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", webp: "image/webp", gif: "image/gif", bmp: "image/bmp",
+};
+
+/** "C:\\a\\Bao cao.final.mov" → "Bao cao.final": làm tiêu đề mặc định cho mục vừa nhập. */
+function fileStem(path: string): string {
+  const name = path.split(/[\\/]/).pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+/** Giải mã thử trước khi mở trình chỉnh sửa: tệp hỏng / đổi đuôi thì báo lỗi ở đây, không mở ra
+ *  một trình chỉnh sửa trắng trơn. */
+function assertDecodes(dataUrl: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => (img.naturalWidth > 0 ? resolve() : reject(new Error("Ảnh rỗng")));
+    img.onerror = () => reject(new Error("Không đọc được ảnh này (tệp hỏng hoặc sai định dạng)"));
+    img.src = dataUrl;
+  });
+}
+
+function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, onRecord, onRegionRecord, onImport, importing, onData, onUsage, onSettings, recording, usageWarnings }: {
   screen: Screen; onHome: () => void; onCapture: () => void; onRegionCapture: () => void; onQrScan: () => void; onRecord: () => void;
-  onRegionRecord: () => void;
+  onRegionRecord: () => void; onImport: () => void; importing: boolean;
   onData: () => void; onUsage: () => void; onSettings: () => void; recording: boolean; usageWarnings: string[];
 }) {
   const hasWarn = usageWarnings.length > 0;
@@ -123,6 +158,13 @@ function GlobalSidebar({ screen, onHome, onCapture, onRegionCapture, onQrScan, o
         <svg {...SidebarS}>
           <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
           <path d="M10 9.2v5.6l5-2.8-5-2.8Z" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+      <button className="lib-tool" onClick={onImport} disabled={importing} title="Mở ảnh hoặc video từ máy tính để chú thích / tải lên">
+        <svg {...SidebarS}>
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/>
+          <polyline points="14 3 14 8 19 8"/>
+          <line x1="12" y1="18" x2="12" y2="11"/><polyline points="9 14 12 11 15 14"/>
         </svg>
       </button>
       <div className="lib-spacer"/>
@@ -276,6 +318,14 @@ function App() {
   // id của mục vừa lưu + tiêu đề cho video (video không qua editor)
   const [resultId, setResultId] = useState<string | null>(null);
   const [videoTitle, setVideoTitle] = useState("");
+  // Đang mở tệp từ máy (chép sang thư mục tạm; video không phải MP4 còn phải chuyển định dạng)
+  const [importing, setImporting] = useState(false);
+  // Sửa lại một video ĐÃ ĐĂNG: id của nó (null = video mới), tiêu đề lúc mở (để biết có đổi không),
+  // và đã cắt chưa — chỉ đổi tiêu đề thì không tải lại cả video lên.
+  const [videoEditId, setVideoEditId] = useState<string | null>(null);
+  const videoEditTitleRef = useRef("");
+  const [videoTrimmed, setVideoTrimmed] = useState(false);
+  const [videoEditLoading, setVideoEditLoading] = useState(false);
   const [titleSaved, setTitleSaved] = useState(false);
 
   // Màn hình kết quả
@@ -545,7 +595,8 @@ function App() {
   //   thumbnail vỡ; đổi URL → nạp lại → nhận image/webp đúng → hiện được. Tăng IMG_FMT
   //   nếu sau này cần buộc nạp lại toàn bộ ảnh.
   const displayItems = libItems.map((it) => {
-    if (it.type !== "image") return it;
+    // Video chỉ bust khi đã sửa lại (cùng URL nhưng nội dung mới; file phục vụ kèm cache 1 năm)
+    if (it.type !== "image") return imgVersions[it.id] ? { ...it, fileUrl: busted(it.fileUrl, imgVersions[it.id]) } : it;
     let url = busted(it.fileUrl, imgVersions[it.id]);
     url += `${url.includes("?") ? "&" : "?"}fmt=${IMG_FMT}`;
     return { ...it, fileUrl: url };
@@ -592,6 +643,8 @@ function App() {
     setTrimStart(0);
     setTrimEnd(0);
     setTrimming(false);
+    setVideoEditId(null);
+    setVideoTrimmed(false);
   }
 
   function manualRegionCapture() {
@@ -600,6 +653,61 @@ function App() {
 
   function manualRegionRecord() {
     invoke("start_region_record").catch(() => {});
+  }
+
+  // Mở ảnh / video có sẵn trên máy. Rust trả về BẢN SAO trong thư mục tạm (import_media ở
+  // ffmpeg.rs) — luồng video coi file của mình là file tạm và xoá nó sau khi cắt / tải lên,
+  // nên tuyệt đối không được đưa thẳng đường dẫn gốc của người dùng vào.
+  // Ảnh → trình chỉnh sửa (như dán ảnh); video → màn kết quả (như video vừa quay).
+  async function importFromDisk() {
+    if (importing) return;
+    let picked: string | string[] | null;
+    try {
+      picked = await openDialog({
+        multiple: false,
+        directory: false,
+        title: "Chọn ảnh hoặc video",
+        filters: [
+          { name: "Ảnh hoặc video", extensions: [...IMPORT_IMAGE_EXT, ...IMPORT_VIDEO_EXT] },
+          { name: "Ảnh", extensions: IMPORT_IMAGE_EXT },
+          { name: "Video", extensions: IMPORT_VIDEO_EXT },
+        ],
+      });
+    } catch (err) {
+      showToast("Không mở được hộp chọn tệp: " + String(err));
+      return;
+    }
+    if (typeof picked !== "string") return; // bấm Huỷ
+    const name = fileStem(picked);
+    setImporting(true);
+    try {
+      const r = await invoke<{ kind: "image" | "video"; path: string; converted: boolean }>("import_media", { src: picked });
+      if (r.kind === "image") {
+        let dataUrl: string;
+        try {
+          const ext = r.path.split(".").pop()?.toLowerCase() ?? "";
+          const bytes = await readFile(r.path);
+          dataUrl = await blobToDataUrl(new Blob([bytes], { type: IMAGE_MIME[ext] ?? "image/png" }));
+        } finally {
+          invoke("remove_temp", { path: r.path }).catch(() => {}); // đã nạp vào bộ nhớ, bản sao hết việc
+        }
+        await assertDecodes(dataUrl);
+        setError(null);
+        setEditId(null);
+        setInitialAnnotations(null);
+        setEditTitle(name);
+        setImage(dataUrl);
+        setScreen("editor");
+      } else {
+        await handleVideoReady(r.path);
+        setVideoTitle(name); // sau handleVideoReady: nó xoá tiêu đề cũ qua resetResult()
+        if (r.converted) showToast("Đã chuyển video sang MP4 để xem được trên mọi trình duyệt");
+      }
+    } catch (err) {
+      showToast("Không mở được tệp: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setImporting(false);
+    }
   }
 
   async function manualCapture() {
@@ -696,13 +804,20 @@ function App() {
     }
   }
 
-  async function handleVideoReady(path: string) {
+  async function handleVideoReady(path: string, edit?: { id: string; title: string }) {
     // Dọn video pending cũ nếu có
     if (videoPendingRef.current) {
       invoke("remove_temp", { path: videoPendingRef.current.path }).catch(() => {});
     }
     setScreen("result");
     resetResult();
+    // Đặt ngay tại đây (cùng lượt render với resetResult) chứ không phải sau khi hàm này xong —
+    // không thì màn hình chớp lên nút "Lưu lên server" của video mới trong một khung hình.
+    if (edit) {
+      setVideoEditId(edit.id);
+      setVideoTitle(edit.title);
+      videoEditTitleRef.current = edit.title;
+    }
     setPreviewType("video");
     try {
       const bytes = await readFile(path);
@@ -745,12 +860,65 @@ function App() {
       if (preview) URL.revokeObjectURL(preview);
       setPreview(URL.createObjectURL(blob));
       videoPendingRef.current = { blob, path: newPath };
+      setVideoTrimmed(true);
       // videoDuration + trimStart/End sẽ tự đặt lại qua onLoadedMetadata của <video>
       showToast("Đã cắt video");
     } catch (err) {
       showToast("Cắt video lỗi: " + String(err));
     } finally {
       setTrimming(false);
+    }
+  }
+
+  // Sửa lại video đã đăng: tải bản trên cloud về thư mục tạm rồi mở đúng màn xem trước / cắt như
+  // video vừa quay. Thêm ?t= để chắc chắn lấy bản mới nhất (file phục vụ kèm cache 1 năm).
+  async function editVideo(item: LibraryItem) {
+    if (videoEditLoading) return;
+    setVideoEditLoading(true);
+    try {
+      const url = `${item.fileUrl}${item.fileUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      const path = await invoke<string>("download_to_temp", { url, ext: "mp4" });
+      await handleVideoReady(path, { id: item.id, title: item.title ?? "" });
+    } catch (err) {
+      showToast("Không tải được video để sửa: " + String(err));
+    } finally {
+      setVideoEditLoading(false);
+    }
+  }
+
+  // Lưu thay đổi của video đã đăng — CÙNG id nên link chia sẻ cũ vẫn chạy và trỏ tới bản mới.
+  // Chưa cắt thì chỉ đổi tiêu đề: tải lại cả video lên chỉ tốn băng thông mà file y hệt.
+  async function saveVideoEdit() {
+    const id = videoEditId;
+    if (!id || !videoPendingRef.current) return;
+    const { blob, path } = videoPendingRef.current;
+    const title = videoTitle.trim();
+    const titleChanged = title !== videoEditTitleRef.current.trim();
+    if (!videoTrimmed && !titleChanged) {
+      showToast("Chưa có thay đổi nào — cắt đoạn hoặc đổi tiêu đề rồi lưu");
+      return;
+    }
+    setVideoPendingReady(false);
+    setUploading(true);
+    try {
+      if (videoTrimmed) {
+        await updateVideo(id, blob, title);
+        bumpImgVersion(id); // thẻ trong thư viện nạp lại video mới thay vì bản cũ trong cache
+      } else {
+        await updateTitle(id, title);
+      }
+      videoPendingRef.current = null;
+      invoke("remove_temp", { path }).catch(() => {});
+      showToast(videoTrimmed ? "Đã cập nhật video — link chia sẻ giữ nguyên" : "Đã đổi tiêu đề");
+      setVideoEditId(null);
+      await openLibrary();
+    } catch (err) {
+      setUploadError(String(err));
+      // Giữ nguyên video đã cắt để thử lại, không bắt người dùng cắt lại từ đầu
+      videoPendingRef.current = { blob, path };
+      setVideoPendingReady(true);
+    } finally {
+      setUploading(false);
     }
   }
 
@@ -1204,6 +1372,10 @@ function App() {
   }
 
   async function onEditItem(item: LibraryItem) {
+    if (item.type === "video") {
+      await editVideo(item);
+      return;
+    }
     try {
       const detail = await getItem(item.id);
       if (!detail.originalUrl) {
@@ -1534,7 +1706,14 @@ function App() {
   if (screen === "library" || screen === "usage" || screen === "settings" || screen === "data") {
     return (
       <div className="lib-layout">
-        {toast && <div className="toast">{toast}</div>}
+        {/* Chuyển định dạng video có thể mất cả phút — giữ thông báo suốt lúc đó, đè lên toast thường */}
+        {importing ? (
+          <div className="toast">Đang mở tệp… (video không phải MP4 sẽ được chuyển định dạng, có thể mất một lúc)</div>
+        ) : videoEditLoading ? (
+          <div className="toast">Đang tải video về để sửa…</div>
+        ) : (
+          toast && <div className="toast">{toast}</div>
+        )}
 
         {DownloadOverlay}
         {ProgressOverlay}
@@ -1549,6 +1728,8 @@ function App() {
           onQrScan={triggerQrScan}
           onRecord={toggleRecord}
           onRegionRecord={manualRegionRecord}
+          onImport={importFromDisk}
+          importing={importing}
           onData={openData}
           onUsage={openUsage}
           onSettings={() => setScreen("settings")}
@@ -1685,7 +1866,17 @@ function App() {
               value={videoTitle}
               onChange={(e) => setVideoTitle(e.target.value)}
             />
-            <button className="primary" onClick={saveVideo}>💾 Lưu lên server</button>
+            {videoEditId ? (
+              <button
+                className="primary"
+                onClick={saveVideoEdit}
+                title="Thay video cũ trên cloud bằng bản này — link chia sẻ giữ nguyên"
+              >
+                💾 Lưu thay đổi
+              </button>
+            ) : (
+              <button className="primary" onClick={saveVideo}>💾 Lưu lên server</button>
+            )}
             <button onClick={saveVideoLocal}>💻 Lưu vào máy</button>
             <button style={{ color: "#dc2626", borderColor: "#fca5a5" }} onClick={backHome}>🗑 Huỷ</button>
           </div>

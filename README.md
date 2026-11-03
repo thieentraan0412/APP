@@ -15,6 +15,8 @@ tải lên Cloudflare và nhận link chia sẻ ngay. Phiên bản hiện tại:
 - Viền nhấp nháy quanh vùng đang quay để biết chỗ nào đang được ghi
 - Cắt video (chọn đoạn cần giữ) trước khi lưu
 - Dán ảnh từ clipboard (Ctrl + V) vào thẳng trình chỉnh sửa
+- Mở ảnh / video có sẵn trên máy (nút trên thanh bên): ảnh vào trình chỉnh sửa, video vào màn
+  xem trước để cắt / tải lên. Video MOV, WebM, MKV, AVI… tự chuyển sang MP4. File gốc giữ nguyên
 - Đổi được mọi phím tắt trong phần Cài đặt
 - Chọn độ phân giải ảnh / video trong Cài đặt: 720p (1280×720) · Full HD (1920×1080) ·
   2K/QHD (2560×1440) · 4K/UHD (3840×2160). Mặc định đúng độ phân giải màn hình (**Native**).
